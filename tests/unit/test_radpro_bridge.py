@@ -3,7 +3,6 @@
 Tests the main application orchestrator that coordinates all components.
 """
 
-
 from src.config import Config
 from src.mqtt_publisher import MQTTPublisher
 from src.radpro_bridge import RadProBridge
