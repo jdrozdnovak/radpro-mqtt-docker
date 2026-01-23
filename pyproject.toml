@@ -41,7 +41,7 @@ dev = [
     "black==23.12.1",
     "mypy==1.7.1",
     "ruff==0.1.8",
-    "types-paho-mqtt==1.6.0.20240106",
+    "types-paho-mqtt==1.6.0.20240321",
 ]
 
 [project.urls]
