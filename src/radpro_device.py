@@ -80,6 +80,7 @@ class RadProDevice:
             if self._serial.is_open:
                 # Give the device a moment to initialize after connection
                 import time
+
                 time.sleep(0.5)
 
                 # Clear any pending data in the input buffer
