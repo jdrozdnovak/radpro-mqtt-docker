@@ -273,7 +273,13 @@ class TestRetryProperties:
     @given(
         max_retries=st.integers(min_value=0, max_value=10),
         backoff_base=st.floats(min_value=1.1, max_value=5.0),
-        return_value=st.one_of(st.integers(), st.floats(), st.text(), st.booleans(), st.none()),
+        return_value=st.one_of(
+            st.integers(),
+            st.floats(allow_nan=False, allow_infinity=False),
+            st.text(),
+            st.booleans(),
+            st.none(),
+        ),
     )
     @settings(max_examples=10, deadline=None)
     def test_return_value_preserved(self, max_retries: int, backoff_base: float, return_value):

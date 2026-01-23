@@ -78,6 +78,9 @@ class MQTTPublisher:
         self.config = config
         self._client: mqtt.Client | None = None
         self._connected = False
+        self._reconnect_attempts = 0
+        self._max_reconnect_attempts = config.max_retries
+        self._should_reconnect = True
 
         # Create MQTT client instance
         self._client = mqtt.Client(client_id="radpro-mqtt-bridge", clean_session=True)
@@ -107,6 +110,7 @@ class MQTTPublisher:
         """
         if rc == 0:
             self._connected = True
+            self._reconnect_attempts = 0  # Reset reconnection attempts on success
             logger.info(
                 f"Connected to MQTT broker at " f"{self.config.mqtt_host}:{self.config.mqtt_port}"
             )
@@ -122,6 +126,11 @@ class MQTTPublisher:
             error_msg = error_messages.get(rc, f"Connection refused - unknown error code {rc}")
             logger.error(f"Failed to connect to MQTT broker: {error_msg}")
 
+            # Handle authentication errors (Requirement 8.2)
+            if rc in [4, 5]:
+                logger.error("Authentication error detected - will not retry with same credentials")
+                self._should_reconnect = False
+
     def _on_disconnect(self, client: mqtt.Client, userdata: Any, rc: int) -> None:
         """Callback for when the client disconnects from the broker.
 
@@ -135,6 +144,74 @@ class MQTTPublisher:
             logger.info("Disconnected from MQTT broker (clean disconnect)")
         else:
             logger.warning(f"Disconnected from MQTT broker unexpectedly (code: {rc})")
+            # Trigger automatic reconnection for unexpected disconnects (Requirement 8.2)
+            if self._should_reconnect:
+                logger.info("Will attempt to reconnect to MQTT broker")
+                self._attempt_reconnect()
+
+    def _attempt_reconnect(self) -> None:
+        """Attempt to reconnect to MQTT broker with exponential backoff.
+
+        This method implements automatic reconnection with exponential backoff
+        when the connection is lost unexpectedly. It respects the maximum
+        retry limit and handles authentication errors appropriately.
+
+        Requirements: 8.2
+        """
+        if not self._should_reconnect:
+            logger.info("Reconnection disabled (authentication error or manual disconnect)")
+            return
+
+        if self._reconnect_attempts >= self._max_reconnect_attempts:
+            logger.error(
+                f"Maximum reconnection attempts ({self._max_reconnect_attempts}) reached. "
+                "Entering failed state."
+            )
+            return
+
+        # Calculate exponential backoff delay (Requirement 8.2)
+        delay = self.config.retry_backoff_base**self._reconnect_attempts
+        self._reconnect_attempts += 1
+
+        logger.info(
+            f"Attempting to reconnect to MQTT broker "
+            f"(attempt {self._reconnect_attempts}/{self._max_reconnect_attempts}) "
+            f"in {delay:.2f} seconds..."
+        )
+
+        # Wait before attempting reconnection
+        time.sleep(delay)
+
+        try:
+            # Attempt to reconnect
+            if self._client is None:
+                logger.error("Cannot reconnect: MQTT client not initialized")
+                return
+
+            logger.info(
+                f"Reconnecting to MQTT broker at "
+                f"{self.config.mqtt_host}:{self.config.mqtt_port}"
+            )
+
+            # The paho-mqtt client will automatically try to reconnect
+            # We just need to call reconnect() which uses the existing connection parameters
+            self._client.reconnect()
+
+            # Wait for connection to establish (with timeout)
+            timeout = 10  # seconds
+            start_time = time.time()
+            while not self._connected and (time.time() - start_time) < timeout:
+                time.sleep(0.1)
+
+            if self._connected:
+                logger.info("Successfully reconnected to MQTT broker")
+            else:
+                logger.warning("Reconnection attempt timed out")
+                # Will retry on next disconnect callback if still not connected
+
+        except Exception as e:
+            logger.error(f"Error during reconnection attempt: {e}")
+            # The disconnect callback will be triggered again if connection fails
 
     def set_last_will(self) -> None:
         """Configure MQTT Last Will and Testament for availability.
@@ -163,7 +240,8 @@ class MQTTPublisher:
 
         Establishes a connection to the MQTT broker using the configured
         host, port, and authentication credentials. The Last Will and Testament
-        should be configured before calling this method.
+        should be configured before calling this method. Enables automatic
+        reconnection on successful connection.
 
         Returns:
             bool: True if connection successful, False otherwise
@@ -175,6 +253,10 @@ class MQTTPublisher:
             return False
 
         try:
+            # Enable automatic reconnection for new connections
+            self._should_reconnect = True
+            self._reconnect_attempts = 0
+
             logger.info(
                 f"Attempting to connect to MQTT broker at "
                 f"{self.config.mqtt_host}:{self.config.mqtt_port}"
@@ -210,7 +292,8 @@ class MQTTPublisher:
         """Disconnect from the MQTT broker.
 
         Gracefully disconnects from the MQTT broker and stops the network loop.
-        This method is safe to call even if not connected.
+        This method is safe to call even if not connected. Disables automatic
+        reconnection to prevent reconnection after intentional disconnect.
 
         Requirements: 3.1
         """
@@ -219,6 +302,9 @@ class MQTTPublisher:
             return
 
         try:
+            # Disable automatic reconnection for manual disconnect
+            self._should_reconnect = False
+
             if self._connected:
                 logger.info("Disconnecting from MQTT broker")
                 self._client.disconnect()
