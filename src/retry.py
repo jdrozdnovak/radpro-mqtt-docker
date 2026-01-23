@@ -7,7 +7,8 @@ for handling transient failures in network operations and device communication.
 import functools
 import logging
 import time
-from typing import Any, Callable, Optional, TypeVar, Union
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +19,8 @@ F = TypeVar("F", bound=Callable[..., Any])
 def retry_with_backoff(
     max_retries: int = 10,
     backoff_base: float = 2.0,
-    exceptions: Union[type[Exception], tuple[type[Exception], ...]] = Exception,
-    on_retry: Optional[Callable[[Exception, int], None]] = None,
+    exceptions: type[Exception] | tuple[type[Exception], ...] = Exception,
+    on_retry: Callable[[Exception, int], None] | None = None,
 ) -> Callable[[F], F]:
     """Decorator that retries a function with exponential backoff.
 
@@ -49,7 +50,7 @@ def retry_with_backoff(
     def decorator(func: F) -> F:
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            last_exception: Optional[Exception] = None
+            last_exception: Exception | None = None
             func_name = getattr(func, "__name__", repr(func))
 
             # Attempt the function call up to max_retries + 1 times
@@ -104,8 +105,8 @@ def retry_with_backoff(
 def retry_with_backoff_async(
     max_retries: int = 10,
     backoff_base: float = 2.0,
-    exceptions: Union[type[Exception], tuple[type[Exception], ...]] = Exception,
-    on_retry: Optional[Callable[[Exception, int], None]] = None,
+    exceptions: type[Exception] | tuple[type[Exception], ...] = Exception,
+    on_retry: Callable[[Exception, int], None] | None = None,
 ) -> Callable[[F], F]:
     """Async version of retry_with_backoff decorator.
 
@@ -135,7 +136,7 @@ def retry_with_backoff_async(
     def decorator(func: F) -> F:
         @functools.wraps(func)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            last_exception: Optional[Exception] = None
+            last_exception: Exception | None = None
             func_name = getattr(func, "__name__", repr(func))
 
             # Attempt the function call up to max_retries + 1 times

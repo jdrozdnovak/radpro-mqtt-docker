@@ -9,7 +9,7 @@ name = "radpro-mqtt-bridge"
 version = "0.1.0"
 description = "Bridge RadPro Geiger counter devices to MQTT with Home Assistant auto-discovery"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "RadPro MQTT Bridge Contributors"}
@@ -21,7 +21,6 @@ classifiers = [
     "Intended Audience :: End Users/Desktop",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -32,18 +31,18 @@ classifiers = [
 ]
 dependencies = [
     "pyserial==3.5",
-    "paho-mqtt==1.6.1",
+    "paho-mqtt==2.1.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest==7.4.3",
-    "hypothesis==6.92.1",
-    "pytest-mock==3.12.0",
-    "black==23.12.1",
-    "mypy==1.7.1",
-    "ruff==0.1.8",
-    "types-paho-mqtt==1.6.0.20240106",
+    "pytest==9.0.2",
+    "hypothesis==6.150.3",
+    "pytest-mock==3.15.1",
+    "black==26.1.0",
+    "mypy==1.19.1",
+    "ruff==0.14.14",
+    "types-paho-mqtt==1.6.0.20240321",
 ]
 
 [project.urls]
@@ -57,7 +56,7 @@ packages = ["src"]
 # Black configuration
 [tool.black]
 line-length = 100
-target-version = ["py39", "py310", "py311", "py312"]
+target-version = ["py310", "py311", "py312"]
 include = '\.pyi?$'
 extend-exclude = '''
 /(
@@ -76,7 +75,9 @@ extend-exclude = '''
 # Ruff configuration
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+target-version = "py310"
+
+[tool.ruff.lint]
 select = [
     "E",   # pycodestyle errors
     "W",   # pycodestyle warnings
@@ -86,22 +87,13 @@ select = [
     "UP",  # pyupgrade
 ]
 ignore = []
-exclude = [
-    ".git",
-    ".mypy_cache",
-    ".ruff_cache",
-    ".venv",
-    "__pycache__",
-    "build",
-    "dist",
-]
 
-[tool.ruff.per-file-ignores]
+[tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]  # Allow unused imports in __init__.py
 
 # Mypy configuration
 [tool.mypy]
-python_version = "3.9"
+python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
@@ -145,4 +137,15 @@ exclude_lines = [
     "raise NotImplementedError",
     "if __name__ == .__main__.:",
     "if TYPE_CHECKING:",
+]
+
+[dependency-groups]
+dev = [
+    "black>=23.12.1",
+    "hypothesis>=6.92.1",
+    "mypy>=1.7.1",
+    "pytest>=7.4.3",
+    "pytest-mock>=3.12.0",
+    "ruff>=0.1.8",
+    "types-paho-mqtt>=1.6.0.20240106",
 ]

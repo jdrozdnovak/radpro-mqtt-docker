@@ -6,7 +6,6 @@ This module defines dataclasses for device information and radiation measurement
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
 
 
 @dataclass
@@ -117,10 +116,10 @@ class DiscoveryPayload:
     state_topic: str
     availability_topic: str
     device: DevicePayload
-    device_class: Optional[str] = None
-    unit_of_measurement: Optional[str] = None
-    icon: Optional[str] = None
-    state_class: Optional[str] = None
+    device_class: str | None = None
+    unit_of_measurement: str | None = None
+    icon: str | None = None
+    state_class: str | None = None
 
     def to_json(self) -> str:
         """Serialize discovery payload to JSON for MQTT publishing.

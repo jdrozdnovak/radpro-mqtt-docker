@@ -6,7 +6,7 @@ and publishing messages to an MQTT broker.
 
 import logging
 import time
-from typing import Any, Optional
+from typing import Any
 
 import paho.mqtt.client as mqtt
 
@@ -76,7 +76,7 @@ class MQTTPublisher:
         Requirements: 3.1
         """
         self.config = config
-        self._client: Optional[mqtt.Client] = None
+        self._client: mqtt.Client | None = None
         self._connected = False
 
         # Create MQTT client instance

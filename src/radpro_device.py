@@ -5,7 +5,6 @@ communication with RadPro Geiger counter devices.
 """
 
 import logging
-from typing import Optional
 
 import serial
 
@@ -40,7 +39,7 @@ class RadProDevice:
         self.device_path = device_path
         self.baudrate = baudrate
         self.timeout = timeout
-        self._serial: Optional[serial.Serial] = None
+        self._serial: serial.Serial | None = None
 
         logger.debug(
             f"RadProDevice initialized: device={device_path}, "
@@ -177,7 +176,7 @@ class RadProDevice:
             )
             return False
 
-    def send_command(self, command: str) -> Optional[str]:
+    def send_command(self, command: str) -> str | None:
         """Send a command to the RadPro device and return the response.
 
         Commands are sent with \\r\\n termination as per the RadPro protocol.
@@ -250,7 +249,7 @@ class RadProDevice:
             logger.error(f"Unexpected error sending command '{command}': {e}")
             return None
 
-    def get_device_id(self) -> Optional[DeviceInfo]:
+    def get_device_id(self) -> DeviceInfo | None:
         """Get device identification information.
 
         Sends the GET deviceId command and parses the response in the format:
@@ -296,7 +295,7 @@ class RadProDevice:
             logger.error(f"Error parsing device ID response '{response}': {e}")
             return None
 
-    def get_tube_rate(self) -> Optional[float]:
+    def get_tube_rate(self) -> float | None:
         """Get tube rate in counts per minute (CPM).
 
         Sends the GET tubeRate command to retrieve the current radiation
@@ -322,7 +321,7 @@ class RadProDevice:
             logger.error(f"Error parsing tube rate response '{response}': {e}")
             return None
 
-    def get_tube_pulse_count(self) -> Optional[int]:
+    def get_tube_pulse_count(self) -> int | None:
         """Get total pulse count since device startup.
 
         Sends the GET tubePulseCount command to retrieve the cumulative
@@ -348,7 +347,7 @@ class RadProDevice:
             logger.error(f"Error parsing tube pulse count response '{response}': {e}")
             return None
 
-    def get_battery_voltage(self) -> Optional[float]:
+    def get_battery_voltage(self) -> float | None:
         """Get battery voltage in volts.
 
         Sends the GET deviceBatteryVoltage command to retrieve the current
@@ -374,7 +373,7 @@ class RadProDevice:
             logger.error(f"Error parsing battery voltage response '{response}': {e}")
             return None
 
-    def get_tube_sensitivity(self) -> Optional[float]:
+    def get_tube_sensitivity(self) -> float | None:
         """Get tube sensitivity in CPM per µSv/h.
 
         Sends the GET tubeSensitivity command to retrieve the tube's
@@ -400,7 +399,7 @@ class RadProDevice:
             logger.error(f"Error parsing tube sensitivity response '{response}': {e}")
             return None
 
-    def get_tube_lifetime(self) -> Optional[int]:
+    def get_tube_lifetime(self) -> int | None:
         """Get tube operational lifetime in seconds.
 
         Sends the GET tubeLifetime command to retrieve the cumulative

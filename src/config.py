@@ -5,7 +5,6 @@ This module provides configuration loading and validation from environment varia
 
 import os
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
@@ -39,8 +38,8 @@ class Config:
     # MQTT Configuration (Requirements 9.2, 9.3, 9.4, 9.5, 9.6)
     mqtt_host: str = ""  # Required, no default
     mqtt_port: int = 1883
-    mqtt_username: Optional[str] = None
-    mqtt_password: Optional[str] = None
+    mqtt_username: str | None = None
+    mqtt_password: str | None = None
     mqtt_topic_prefix: str = "radpro"
 
     # Home Assistant Configuration (Requirement 9.8)
