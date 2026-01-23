@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  radpro-mqtt-bridge:
+    image: ghcr.io/yourusername/radpro-mqtt-bridge:latest
+    container_name: radpro-mqtt-bridge
+    restart: unless-stopped
+    
+    # USB device mapping for RadPro device
+    devices:
+      - /dev/ttyACM0:/dev/ttyACM0
+    
+    # Environment variables
+    environment:
+      # Required: MQTT broker configuration
+      - MQTT_HOST=mosquitto
+      - MQTT_PORT=1883
+      
+      # Optional: MQTT authentication
+      - MQTT_USERNAME=
+      - MQTT_PASSWORD=
+      
+      # Optional: Topic configuration
+      - MQTT_TOPIC_PREFIX=radpro
+      - HA_DISCOVERY_PREFIX=homeassistant
+      
+      # Optional: Device configuration
+      - RADPRO_DEVICE=/dev/ttyACM0
+      - POLL_INTERVAL=60
+      
+      # Optional: Logging
+      - LOG_LEVEL=INFO
+    
+    # Depend on MQTT broker
+    depends_on:
+      - mosquitto
+    
+    networks:
+      - mqtt-network
+
+  # Optional: Mosquitto MQTT broker for testing
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: mosquitto
+    restart: unless-stopped
+    
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    
+    volumes:
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-logs:/mosquitto/log
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    
+    networks:
+      - mqtt-network
+
+volumes:
+  mosquitto-data:
+  mosquitto-logs:
+
+networks:
+  mqtt-network:
+    driver: bridge
