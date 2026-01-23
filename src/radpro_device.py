@@ -78,6 +78,14 @@ class RadProDevice:
             )
 
             if self._serial.is_open:
+                # Give the device a moment to initialize after connection
+                import time
+                time.sleep(0.5)
+                
+                # Clear any pending data in the input buffer
+                self._serial.reset_input_buffer()
+                self._serial.reset_output_buffer()
+                
                 logger.info(f"Successfully connected to RadPro device at {self.device_path}")
                 return True
             else:
@@ -402,7 +410,7 @@ class RadProDevice:
     def get_tube_lifetime(self) -> int | None:
         """Get tube operational lifetime in seconds.
 
-        Sends the GET tubeLifetime command to retrieve the cumulative
+        Sends the GET tubeTime command to retrieve the cumulative
         operational time of the Geiger-Müller tube.
 
         Returns:
@@ -410,7 +418,7 @@ class RadProDevice:
 
         Requirements: 5.1
         """
-        response = self.send_command("GET tubeLifetime")
+        response = self.send_command("GET tubeTime")
 
         if response is None:
             logger.error("Failed to get tube lifetime: no response")

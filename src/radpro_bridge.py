@@ -161,8 +161,8 @@ class RadProBridge:
 
         tube_lifetime = self.device.get_tube_lifetime()
         if tube_lifetime is None:
-            logger.warning("Failed to get tube lifetime, skipping this polling cycle")
-            return
+            logger.warning("Failed to get tube lifetime, using 0 as default")
+            tube_lifetime = 0
 
         # Create RadiationMeasurement object (Requirement 2.5)
         measurement = RadiationMeasurement(

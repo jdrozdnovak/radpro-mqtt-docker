@@ -810,7 +810,7 @@ class TestRadProDeviceGetTubeLifetime:
         lifetime = device.get_tube_lifetime()
 
         # Verify command was sent (Requirement 5.1)
-        mock_serial_instance.write.assert_called_with(b"GET tubeLifetime\r\n")
+        mock_serial_instance.write.assert_called_with(b"GET tubeTime\r\n")
 
         # Verify parsing
         assert lifetime == 86400
@@ -927,10 +927,12 @@ class TestRadProDeviceReconnect:
         assert mock_serial_class.call_count == 3
 
         # Verify exponential backoff was used (Requirement 8.1)
-        assert mock_sleep.call_count == 2  # Two retries before success
+        # Two retries (1.0s, 2.0s) + one 0.5s sleep after successful connection = 3 calls
+        assert mock_sleep.call_count == 3
         # First retry: 2^0 = 1 second, second retry: 2^1 = 2 seconds
         mock_sleep.assert_any_call(1.0)
         mock_sleep.assert_any_call(2.0)
+        mock_sleep.assert_any_call(0.5)  # Post-connection initialization delay
 
     @patch("src.radpro_device.serial.Serial")
     @patch("time.sleep")  # Mock sleep to speed up test
