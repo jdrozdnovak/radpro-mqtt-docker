@@ -4,7 +4,7 @@
 FROM python:3.14-slim as builder
 
 # Install uv for fast dependency installation
-RUN pip install --no-cache-dir uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 # Set working directory
 WORKDIR /app
@@ -13,7 +13,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock* ./
 
 # Install dependencies using uv
-RUN uv pip install --system --no-cache -r pyproject.toml
+RUN uv sync --frozen --no-dev
 
 # Final stage
 FROM python:3.14-slim
@@ -21,9 +21,11 @@ FROM python:3.14-slim
 # Set working directory
 WORKDIR /app
 
-# Copy installed dependencies from builder
-COPY --from=builder /usr/local/lib/python3.14/site-packages /usr/local/lib/python3.14/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
+# Copy uv from builder
+COPY --from=builder /usr/local/bin/uv /usr/local/bin/uv
+
+# Copy virtual environment from builder
+COPY --from=builder /app/.venv /app/.venv
 
 # Copy application code
 COPY src/ ./src/
@@ -34,6 +36,7 @@ RUN mkdir -p /tmp
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
+ENV PATH="/app/.venv/bin:$PATH"
 
 # Health check
 HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 \

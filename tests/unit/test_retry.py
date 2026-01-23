@@ -5,7 +5,7 @@ implements exponential backoff and retry logic.
 """
 
 import time
-from unittest.mock import Mock, call
+from unittest.mock import Mock
 
 import pytest
 
@@ -28,9 +28,9 @@ class TestRetryWithBackoff:
     def test_successful_after_retries(self):
         """Test that function succeeds after some failures."""
         mock_func = Mock(side_effect=[ValueError("fail1"), ValueError("fail2"), "success"])
-        decorated = retry_with_backoff(
-            max_retries=3, backoff_base=2.0, exceptions=ValueError
-        )(mock_func)
+        decorated = retry_with_backoff(max_retries=3, backoff_base=2.0, exceptions=ValueError)(
+            mock_func
+        )
 
         result = decorated()
 
@@ -40,9 +40,9 @@ class TestRetryWithBackoff:
     def test_max_retries_exceeded(self):
         """Test that exception is raised after max retries exceeded."""
         mock_func = Mock(side_effect=ValueError("persistent failure"))
-        decorated = retry_with_backoff(
-            max_retries=2, backoff_base=2.0, exceptions=ValueError
-        )(mock_func)
+        decorated = retry_with_backoff(max_retries=2, backoff_base=2.0, exceptions=ValueError)(
+            mock_func
+        )
 
         with pytest.raises(ValueError, match="persistent failure"):
             decorated()
@@ -82,9 +82,9 @@ class TestRetryWithBackoff:
     def test_specific_exception_types(self):
         """Test that only specified exception types are retried."""
         mock_func = Mock(side_effect=RuntimeError("wrong exception"))
-        decorated = retry_with_backoff(
-            max_retries=3, backoff_base=2.0, exceptions=ValueError
-        )(mock_func)
+        decorated = retry_with_backoff(max_retries=3, backoff_base=2.0, exceptions=ValueError)(
+            mock_func
+        )
 
         # RuntimeError should not be caught and retried
         with pytest.raises(RuntimeError, match="wrong exception"):
@@ -95,9 +95,7 @@ class TestRetryWithBackoff:
 
     def test_multiple_exception_types(self):
         """Test that multiple exception types can be specified for retry."""
-        mock_func = Mock(
-            side_effect=[ValueError("fail1"), RuntimeError("fail2"), "success"]
-        )
+        mock_func = Mock(side_effect=[ValueError("fail1"), RuntimeError("fail2"), "success"])
         decorated = retry_with_backoff(
             max_retries=3, backoff_base=2.0, exceptions=(ValueError, RuntimeError)
         )(mock_func)
@@ -144,9 +142,9 @@ class TestRetryWithBackoff:
     def test_zero_max_retries(self):
         """Test that max_retries=0 means no retries (only initial attempt)."""
         mock_func = Mock(side_effect=ValueError("fail"))
-        decorated = retry_with_backoff(
-            max_retries=0, backoff_base=2.0, exceptions=ValueError
-        )(mock_func)
+        decorated = retry_with_backoff(max_retries=0, backoff_base=2.0, exceptions=ValueError)(
+            mock_func
+        )
 
         with pytest.raises(ValueError, match="fail"):
             decorated()
@@ -210,9 +208,9 @@ class TestRetryWithBackoff:
     def test_large_max_retries(self):
         """Test that large max_retries value is handled correctly."""
         mock_func = Mock(side_effect=[ValueError("fail")] * 5 + ["success"])
-        decorated = retry_with_backoff(
-            max_retries=10, backoff_base=2.0, exceptions=ValueError
-        )(mock_func)
+        decorated = retry_with_backoff(max_retries=10, backoff_base=2.0, exceptions=ValueError)(
+            mock_func
+        )
 
         result = decorated()
 

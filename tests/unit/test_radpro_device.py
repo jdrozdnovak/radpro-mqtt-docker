@@ -1,6 +1,6 @@
 """Unit tests for RadProDevice class."""
 
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import serial
 

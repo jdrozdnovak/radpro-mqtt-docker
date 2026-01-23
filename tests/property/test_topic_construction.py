@@ -4,13 +4,13 @@ Tests universal properties of topic construction across various inputs
 using hypothesis for property-based testing.
 """
 
-import pytest
-from hypothesis import given, settings, strategies as st
 from unittest.mock import Mock, patch
+
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from src.config import Config
 from src.mqtt_publisher import MQTTPublisher
-
 
 # Strategy for valid topic prefixes (alphanumeric, underscores, hyphens)
 topic_prefix_strategy = st.text(

@@ -7,7 +7,7 @@ for handling transient failures in network operations and device communication.
 import functools
 import logging
 import time
-from typing import Any, Callable, Optional, Type, TypeVar, Union
+from typing import Any, Callable, Optional, TypeVar, Union
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ F = TypeVar("F", bound=Callable[..., Any])
 def retry_with_backoff(
     max_retries: int = 10,
     backoff_base: float = 2.0,
-    exceptions: Union[Type[Exception], tuple[Type[Exception], ...]] = Exception,
+    exceptions: Union[type[Exception], tuple[type[Exception], ...]] = Exception,
     on_retry: Optional[Callable[[Exception, int], None]] = None,
 ) -> Callable[[F], F]:
     """Decorator that retries a function with exponential backoff.
@@ -75,7 +75,8 @@ def retry_with_backoff(
                     delay = backoff_base**attempt
 
                     logger.warning(
-                        f"Function {func_name} failed (attempt {attempt + 1}/{max_retries + 1}): {e}. "
+                        f"Function {func_name} failed "
+                        f"(attempt {attempt + 1}/{max_retries + 1}): {e}. "
                         f"Retrying in {delay:.2f} seconds..."
                     )
 
@@ -103,7 +104,7 @@ def retry_with_backoff(
 def retry_with_backoff_async(
     max_retries: int = 10,
     backoff_base: float = 2.0,
-    exceptions: Union[Type[Exception], tuple[Type[Exception], ...]] = Exception,
+    exceptions: Union[type[Exception], tuple[type[Exception], ...]] = Exception,
     on_retry: Optional[Callable[[Exception, int], None]] = None,
 ) -> Callable[[F], F]:
     """Async version of retry_with_backoff decorator.
@@ -158,7 +159,8 @@ def retry_with_backoff_async(
                     delay = backoff_base**attempt
 
                     logger.warning(
-                        f"Async function {func_name} failed (attempt {attempt + 1}/{max_retries + 1}): {e}. "
+                        f"Async function {func_name} failed "
+                        f"(attempt {attempt + 1}/{max_retries + 1}): {e}. "
                         f"Retrying in {delay:.2f} seconds..."
                     )
 

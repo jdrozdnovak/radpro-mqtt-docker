@@ -4,10 +4,10 @@ This module uses hypothesis to test universal properties of the retry decorator
 across a wide range of inputs.
 """
 
-import pytest
 import time
 from unittest.mock import Mock
 
+import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -163,9 +163,7 @@ class TestRetryProperties:
         attempt=st.integers(min_value=0, max_value=1),
     )
     @settings(max_examples=5, deadline=None)
-    def test_backoff_delay_formula(
-        self, max_retries: int, backoff_base: float, attempt: int
-    ):
+    def test_backoff_delay_formula(self, max_retries: int, backoff_base: float, attempt: int):
         """Property: Backoff delay should follow the formula delay = base^attempt.
 
         **Validates: Requirements 8.2**
@@ -207,9 +205,7 @@ class TestRetryProperties:
         backoff_base=st.floats(min_value=1.1, max_value=5.0),
     )
     @settings(max_examples=10, deadline=None)
-    def test_exception_propagated_after_max_retries(
-        self, max_retries: int, backoff_base: float
-    ):
+    def test_exception_propagated_after_max_retries(self, max_retries: int, backoff_base: float):
         """Property: Original exception should be raised after max_retries exceeded.
 
         **Validates: Requirements 8.2, 8.5**
@@ -227,7 +223,7 @@ class TestRetryProperties:
 
         try:
             decorated()
-            assert False, "Should have raised ValueError"
+            raise AssertionError("Should have raised ValueError")
         except ValueError as e:
             assert str(e) == "persistent failure"
 
@@ -277,14 +273,10 @@ class TestRetryProperties:
     @given(
         max_retries=st.integers(min_value=0, max_value=10),
         backoff_base=st.floats(min_value=1.1, max_value=5.0),
-        return_value=st.one_of(
-            st.integers(), st.floats(), st.text(), st.booleans(), st.none()
-        ),
+        return_value=st.one_of(st.integers(), st.floats(), st.text(), st.booleans(), st.none()),
     )
     @settings(max_examples=10, deadline=None)
-    def test_return_value_preserved(
-        self, max_retries: int, backoff_base: float, return_value
-    ):
+    def test_return_value_preserved(self, max_retries: int, backoff_base: float, return_value):
         """Property: Decorator should preserve the function's return value.
 
         **Validates: Requirements 8.2, 8.5**

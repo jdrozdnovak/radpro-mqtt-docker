@@ -189,6 +189,7 @@ class TestDiscoveryPayload:
     def test_discovery_payload_to_json_all_fields(self):
         """Test DiscoveryPayload JSON serialization with all fields."""
         import json
+
         from src.models import DevicePayload, DiscoveryPayload
 
         device = DevicePayload(
@@ -236,6 +237,7 @@ class TestDiscoveryPayload:
     def test_discovery_payload_to_json_with_device_class(self):
         """Test DiscoveryPayload JSON serialization with device_class."""
         import json
+
         from src.models import DevicePayload, DiscoveryPayload
 
         device = DevicePayload(
@@ -269,6 +271,7 @@ class TestDiscoveryPayload:
     def test_discovery_payload_to_json_minimal_fields(self):
         """Test DiscoveryPayload JSON serialization with minimal fields."""
         import json
+
         from src.models import DevicePayload, DiscoveryPayload
 
         device = DevicePayload(
@@ -306,6 +309,7 @@ class TestDiscoveryPayload:
     def test_discovery_payload_to_json_is_valid_json(self):
         """Test that to_json produces valid JSON."""
         import json
+
         from src.models import DevicePayload, DiscoveryPayload
 
         device = DevicePayload(
@@ -334,6 +338,7 @@ class TestDiscoveryPayload:
     def test_discovery_payload_to_json_unicode_handling(self):
         """Test that to_json handles unicode characters correctly."""
         import json
+
         from src.models import DevicePayload, DiscoveryPayload
 
         device = DevicePayload(

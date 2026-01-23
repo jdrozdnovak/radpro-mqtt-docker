@@ -35,28 +35,23 @@ jobs:
       
       - name: Install dependencies
         run: |
-          uv venv
-          uv pip install --python .venv/bin/python -e ".[dev]"
+          uv sync --all-extras
       
       - name: Run tests
         run: |
-          source .venv/bin/activate
-          pytest tests/ -v
+          uv run pytest tests/ -v
       
       - name: Run type checking
         run: |
-          source .venv/bin/activate
-          mypy src/
+          uv run mypy src/
       
       - name: Run linting
         run: |
-          source .venv/bin/activate
-          ruff check src/ tests/
+          uv run ruff check src/ tests/
       
       - name: Check formatting
         run: |
-          source .venv/bin/activate
-          black --check src/ tests/
+          uv run black --check src/ tests/
 
   build:
     name: Build and Push Docker Image
