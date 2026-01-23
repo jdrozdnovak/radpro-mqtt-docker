@@ -81,11 +81,11 @@ class RadProDevice:
                 # Give the device a moment to initialize after connection
                 import time
                 time.sleep(0.5)
-                
+
                 # Clear any pending data in the input buffer
                 self._serial.reset_input_buffer()
                 self._serial.reset_output_buffer()
-                
+
                 logger.info(f"Successfully connected to RadPro device at {self.device_path}")
                 return True
             else:
