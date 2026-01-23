@@ -36,28 +36,27 @@ jobs:
       - name: Install dependencies
         run: |
           uv venv
-          source .venv/bin/activate
-          uv pip install -r pyproject.toml
+          uv pip install --python .venv/bin/python -e ".[dev]"
       
       - name: Run tests
         run: |
           source .venv/bin/activate
-          uv run pytest tests/ -v
+          pytest tests/ -v
       
       - name: Run type checking
         run: |
           source .venv/bin/activate
-          uv run mypy src/
+          mypy src/
       
       - name: Run linting
         run: |
           source .venv/bin/activate
-          uv run ruff check src/ tests/
+          ruff check src/ tests/
       
       - name: Check formatting
         run: |
           source .venv/bin/activate
-          uv run black --check src/ tests/
+          black --check src/ tests/
 
   build:
     name: Build and Push Docker Image
