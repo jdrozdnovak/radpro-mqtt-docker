@@ -262,6 +262,10 @@ class MQTTPublisher:
                 f"{self.config.mqtt_host}:{self.config.mqtt_port}"
             )
 
+            # Enable automatic reconnection in paho-mqtt
+            # This will automatically reconnect if connection is lost
+            self._client.reconnect_delay_set(min_delay=1, max_delay=120)
+
             # Connect to broker (Requirement 3.1)
             self._client.connect(
                 host=self.config.mqtt_host, port=self.config.mqtt_port, keepalive=60
@@ -442,13 +446,15 @@ class MQTTPublisher:
         Publishes discovery configuration messages for all defined sensors
         to enable Home Assistant auto-discovery. Each sensor gets its own
         discovery topic following the Home Assistant MQTT Discovery format.
+        Automatically reconnects if connection is lost.
 
         Args:
             device_info: Device identification information
 
         Requirements: 4.1, 4.2
         """
-        if not self.is_connected() or self._client is None:
+        # Ensure we're connected before publishing
+        if not self._ensure_connected():
             logger.error("Cannot publish discovery: not connected to MQTT broker")
             return
 
@@ -485,11 +491,53 @@ class MQTTPublisher:
 
         logger.info(f"Completed publishing discovery payloads for {len(SENSORS)} sensors")
 
+    def _ensure_connected(self) -> bool:
+        """Ensure MQTT connection is active, reconnect if needed.
+
+        Checks if the client is connected and attempts to reconnect if not.
+        This provides resilience against transient connection losses.
+
+        Returns:
+            bool: True if connected (or successfully reconnected), False otherwise
+        """
+        if self._client is None:
+            logger.error("MQTT client not initialized")
+            return False
+
+        # Check if already connected
+        if self._connected and self._client.is_connected():
+            return True
+
+        # Not connected, attempt to reconnect
+        logger.warning("MQTT connection lost, attempting to reconnect...")
+
+        try:
+            # Try to reconnect
+            self._client.reconnect()
+
+            # Wait briefly for reconnection
+            timeout = 5  # seconds
+            start_time = time.time()
+            while not self._connected and (time.time() - start_time) < timeout:
+                time.sleep(0.1)
+
+            if self._connected:
+                logger.info("Successfully reconnected to MQTT broker")
+                return True
+            else:
+                logger.error("Failed to reconnect to MQTT broker")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error during reconnection: {e}")
+            return False
+
     def publish_sensor_state(self, sensor: str, value: Any) -> None:
         """Publish sensor state to MQTT.
 
         Publishes a sensor's current value to its state topic in JSON format.
         The value is serialized to JSON and published to the sensor's state topic.
+        Automatically reconnects if connection is lost.
 
         Args:
             sensor: The sensor type (e.g., "dose_rate", "cpm")
@@ -497,7 +545,8 @@ class MQTTPublisher:
 
         Requirements: 3.3
         """
-        if not self.is_connected() or self._client is None:
+        # Ensure we're connected before publishing
+        if not self._ensure_connected():
             logger.error(f"Cannot publish sensor state for {sensor}: not connected to MQTT broker")
             return
 
@@ -528,7 +577,7 @@ class MQTTPublisher:
 
         Publishes the bridge's availability status (online/offline) to the
         availability topic. This is used by Home Assistant to determine if
-        the device is reachable.
+        the device is reachable. Automatically reconnects if connection is lost.
 
         Args:
             status: Availability status ("online" or "offline")
@@ -538,6 +587,17 @@ class MQTTPublisher:
         if self._client is None:
             logger.error("Cannot publish availability: MQTT client not initialized")
             return
+
+        # For offline status, don't try to reconnect (we're shutting down)
+        if status == "offline":
+            if not self.is_connected():
+                logger.warning("Cannot publish offline status: not connected")
+                return
+        else:
+            # For online status, ensure we're connected
+            if not self._ensure_connected():
+                logger.error("Cannot publish availability: not connected to MQTT broker")
+                return
 
         try:
             # Get the availability topic
