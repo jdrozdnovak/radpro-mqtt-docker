@@ -454,7 +454,7 @@ class MQTTPublisher:
         Requirements: 4.1, 4.2
         """
         # Ensure we're connected before publishing
-        if not self._ensure_connected():
+        if not self._ensure_connected() or self._client is None:
             logger.error("Cannot publish discovery: not connected to MQTT broker")
             return
 
@@ -546,7 +546,7 @@ class MQTTPublisher:
         Requirements: 3.3
         """
         # Ensure we're connected before publishing
-        if not self._ensure_connected():
+        if not self._ensure_connected() or self._client is None:
             logger.error(f"Cannot publish sensor state for {sensor}: not connected to MQTT broker")
             return
 
