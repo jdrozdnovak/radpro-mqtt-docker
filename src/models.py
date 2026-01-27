@@ -36,6 +36,13 @@ class RadiationMeasurement:
         battery_voltage: Battery voltage in volts
         tube_sensitivity: Tube sensitivity in CPM per µSv/h
         tube_lifetime: Tube operational lifetime in seconds
+        tube_dead_time: Tube dead time in microseconds (optional)
+        tube_dead_time_compensation: Dead time compensation in seconds (optional)
+        tube_hv_duty_cycle: HV generator duty cycle percentage (optional)
+        tube_hv_frequency: HV generator frequency in Hz (optional)
+        cpm_1min: 1-minute moving average CPM (optional)
+        cpm_5min: 5-minute moving average CPM (optional)
+        cpm_15min: 15-minute moving average CPM (optional)
 
     Requirements: 2.5
     """
@@ -46,6 +53,17 @@ class RadiationMeasurement:
     battery_voltage: float
     tube_sensitivity: float
     tube_lifetime: int
+
+    # Advanced sensors (optional)
+    tube_dead_time: float | None = None
+    tube_dead_time_compensation: float | None = None
+    tube_hv_duty_cycle: float | None = None
+    tube_hv_frequency: float | None = None
+
+    # Moving averages (optional)
+    cpm_1min: float | None = None
+    cpm_5min: float | None = None
+    cpm_15min: float | None = None
 
     @property
     def dose_rate(self) -> float:

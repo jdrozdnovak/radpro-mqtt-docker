@@ -51,6 +51,13 @@ class Config:
     max_retries: int = 10
     retry_backoff_base: float = 2.0
 
+    # Enhanced Features Configuration
+    enable_advanced_sensors: bool = True
+    sync_device_time: bool = True
+    time_sync_interval: int = 86400  # Re-sync every 24 hours (0 = once only)
+    enable_pulse_tracking: bool = True
+    pulse_tracking_windows: tuple[int, ...] = (1, 5, 15)  # Minutes for moving averages
+
     @classmethod
     def from_env(cls) -> "Config":
         """Load configuration from environment variables.
@@ -88,6 +95,13 @@ class Config:
         poll_interval_str = os.getenv("POLL_INTERVAL", "60")
         log_level = os.getenv("LOG_LEVEL", "INFO")
 
+        # Enhanced features configuration
+        enable_advanced_sensors = os.getenv("ENABLE_ADVANCED_SENSORS", "true").lower() == "true"
+        sync_device_time = os.getenv("SYNC_DEVICE_TIME", "true").lower() == "true"
+        time_sync_interval_str = os.getenv("TIME_SYNC_INTERVAL", "86400")
+        enable_pulse_tracking = os.getenv("ENABLE_PULSE_TRACKING", "true").lower() == "true"
+        pulse_tracking_windows_str = os.getenv("PULSE_TRACKING_WINDOWS", "1,5,15")
+
         # Type conversions with error handling (Requirement 9.10)
         try:
             mqtt_port = int(mqtt_port_str)
@@ -103,6 +117,24 @@ class Config:
                 f"Invalid POLL_INTERVAL value '{poll_interval_str}': must be an integer"
             ) from e
 
+        try:
+            time_sync_interval = int(time_sync_interval_str)
+        except ValueError as e:
+            raise ValueError(
+                f"Invalid TIME_SYNC_INTERVAL value '{time_sync_interval_str}': must be an integer"
+            ) from e
+
+        # Parse pulse tracking windows
+        try:
+            pulse_tracking_windows = tuple(
+                int(w.strip()) for w in pulse_tracking_windows_str.split(",")
+            )
+        except ValueError as e:
+            raise ValueError(
+                f"Invalid PULSE_TRACKING_WINDOWS value '{pulse_tracking_windows_str}': "
+                f"must be comma-separated integers"
+            ) from e
+
         # Create config instance
         config = cls(
             device_path=device_path,
@@ -114,6 +146,11 @@ class Config:
             ha_discovery_prefix=ha_discovery_prefix,
             poll_interval=poll_interval,
             log_level=log_level,
+            enable_advanced_sensors=enable_advanced_sensors,
+            sync_device_time=sync_device_time,
+            time_sync_interval=time_sync_interval,
+            enable_pulse_tracking=enable_pulse_tracking,
+            pulse_tracking_windows=pulse_tracking_windows,
         )
 
         return config

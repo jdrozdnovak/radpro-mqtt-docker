@@ -51,6 +51,56 @@ SENSORS: dict[str, dict[str, Any]] = {
         "icon": "mdi:timer-outline",
         "state_class": "total_increasing",
     },
+    # Advanced sensors
+    "tube_dead_time": {
+        "name": "Tube Dead Time",
+        "device_class": None,
+        "unit_of_measurement": "µs",
+        "icon": "mdi:timer-sand",
+        "state_class": "measurement",
+    },
+    "tube_dead_time_compensation": {
+        "name": "Dead Time Compensation",
+        "device_class": None,
+        "unit_of_measurement": "s",
+        "icon": "mdi:timer-cog",
+        "state_class": "measurement",
+    },
+    "hv_duty_cycle": {
+        "name": "HV Duty Cycle",
+        "device_class": None,
+        "unit_of_measurement": "%",
+        "icon": "mdi:sine-wave",
+        "state_class": "measurement",
+    },
+    "hv_frequency": {
+        "name": "HV Frequency",
+        "device_class": "frequency",
+        "unit_of_measurement": "Hz",
+        "state_class": "measurement",
+    },
+    # Moving average CPM sensors
+    "cpm_1min": {
+        "name": "CPM (1 min avg)",
+        "device_class": None,
+        "unit_of_measurement": "CPM",
+        "icon": "mdi:chart-line",
+        "state_class": "measurement",
+    },
+    "cpm_5min": {
+        "name": "CPM (5 min avg)",
+        "device_class": None,
+        "unit_of_measurement": "CPM",
+        "icon": "mdi:chart-line",
+        "state_class": "measurement",
+    },
+    "cpm_15min": {
+        "name": "CPM (15 min avg)",
+        "device_class": None,
+        "unit_of_measurement": "CPM",
+        "icon": "mdi:chart-line",
+        "state_class": "measurement",
+    },
 }
 
 

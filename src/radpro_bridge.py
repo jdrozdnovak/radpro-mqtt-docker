@@ -2,7 +2,7 @@
 
 This module provides the RadProBridge class that orchestrates all components
 of the bridge application, including USB serial communication, MQTT publishing,
-and the main polling loop.
+pulse tracking, and the main polling loop.
 """
 
 import logging
@@ -13,6 +13,7 @@ from datetime import datetime
 from src.config import Config
 from src.models import DeviceInfo, RadiationMeasurement
 from src.mqtt_publisher import MQTTPublisher
+from src.pulse_tracker import PulseTracker
 from src.radpro_device import RadProDevice
 
 logger = logging.getLogger(__name__)
@@ -33,8 +34,8 @@ class RadProBridge:
     def __init__(self, config: Config):
         """Initialize RadProBridge with configuration.
 
-        Creates instances of Config, RadProDevice, and MQTTPublisher
-        components. The components are not connected until setup() is called.
+        Creates instances of Config, RadProDevice, MQTTPublisher, and optionally
+        PulseTracker components. The components are not connected until setup() is called.
 
         Args:
             config: Configuration object containing all application settings
@@ -44,6 +45,7 @@ class RadProBridge:
         self.config = config
         self._device_info: DeviceInfo | None = None
         self._shutdown_requested = False
+        self._last_time_sync: float = 0.0
 
         # Create RadProDevice instance (Requirement 6.1)
         self.device = RadProDevice(
@@ -55,11 +57,19 @@ class RadProBridge:
         # Create MQTTPublisher instance (Requirement 6.1)
         self.publisher = MQTTPublisher(config=config)
 
+        # Create PulseTracker if enabled
+        self.pulse_tracker: PulseTracker | None = None
+        if config.enable_pulse_tracking:
+            self.pulse_tracker = PulseTracker(windows=config.pulse_tracking_windows)
+            logger.info(f"Pulse tracking enabled with windows: {config.pulse_tracking_windows}")
+
         logger.info("RadProBridge initialized")
         logger.debug(
             f"Configuration: device={config.device_path}, "
             f"mqtt_host={config.mqtt_host}:{config.mqtt_port}, "
-            f"poll_interval={config.poll_interval}s"
+            f"poll_interval={config.poll_interval}s, "
+            f"advanced_sensors={config.enable_advanced_sensors}, "
+            f"pulse_tracking={config.enable_pulse_tracking}"
         )
 
     def setup(self) -> bool:
@@ -99,6 +109,15 @@ class RadProBridge:
             f"SW: {self._device_info.software_id})"
         )
 
+        # Step 2.5: Sync device time if enabled
+        if self.config.sync_device_time:
+            logger.info("Synchronizing device time...")
+            if self.device.sync_time():
+                self._last_time_sync = time.time()
+                logger.info("Device time synchronized successfully")
+            else:
+                logger.warning("Failed to sync device time, continuing anyway")
+
         # Step 3: Connect to MQTT broker (Requirement 3.1)
         logger.info("Connecting to MQTT broker...")
 
@@ -136,9 +155,16 @@ class RadProBridge:
 
         logger.debug("Starting sensor polling cycle...")
 
-        # Poll all sensors from device (Requirements 2.2, 2.3, 2.4, 2.6)
-        # Handle individual sensor failures gracefully (Requirement 2.7)
+        # Check if time sync is needed
+        if self.config.sync_device_time and self.config.time_sync_interval > 0:
+            time_since_sync = time.time() - self._last_time_sync
+            if time_since_sync >= self.config.time_sync_interval:
+                logger.info("Periodic time sync triggered")
+                if self.device.sync_time():
+                    self._last_time_sync = time.time()
+                    logger.info("Device time re-synchronized")
 
+        # Poll core sensors (Requirements 2.2, 2.3, 2.4, 2.6)
         tube_rate = self.device.get_tube_rate()
         if tube_rate is None:
             logger.warning("Failed to get tube rate, skipping this polling cycle")
@@ -164,6 +190,36 @@ class RadProBridge:
             logger.warning("Failed to get tube lifetime, using 0 as default")
             tube_lifetime = 0
 
+        # Poll advanced sensors if enabled
+        tube_dead_time = None
+        tube_dead_time_compensation = None
+        tube_hv_duty_cycle = None
+        tube_hv_frequency = None
+
+        if self.config.enable_advanced_sensors:
+            tube_dead_time = self.device.get_tube_dead_time()
+            tube_dead_time_compensation = self.device.get_tube_dead_time_compensation()
+            tube_hv_duty_cycle = self.device.get_tube_hv_duty_cycle()
+            tube_hv_frequency = self.device.get_tube_hv_frequency()
+
+        # Update pulse tracker and get moving averages
+        cpm_1min = None
+        cpm_5min = None
+        cpm_15min = None
+
+        if self.pulse_tracker is not None:
+            self.pulse_tracker.add_measurement(tube_pulse_count)
+            averages = self.pulse_tracker.get_all_moving_averages()
+
+            # Map window sizes to variables
+            for window, cpm in averages.items():
+                if window == 1:
+                    cpm_1min = cpm
+                elif window == 5:
+                    cpm_5min = cpm
+                elif window == 15:
+                    cpm_15min = cpm
+
         # Create RadiationMeasurement object (Requirement 2.5)
         measurement = RadiationMeasurement(
             timestamp=datetime.now(),
@@ -172,6 +228,13 @@ class RadProBridge:
             battery_voltage=battery_voltage,
             tube_sensitivity=tube_sensitivity,
             tube_lifetime=tube_lifetime,
+            tube_dead_time=tube_dead_time,
+            tube_dead_time_compensation=tube_dead_time_compensation,
+            tube_hv_duty_cycle=tube_hv_duty_cycle,
+            tube_hv_frequency=tube_hv_frequency,
+            cpm_1min=cpm_1min,
+            cpm_5min=cpm_5min,
+            cpm_15min=cpm_15min,
         )
 
         # Log the measurement
@@ -181,37 +244,51 @@ class RadProBridge:
             f"battery={measurement.battery_voltage:.2f}V"
         )
 
-        # Publish sensor states to MQTT (Requirement 3.3)
-        # Handle individual sensor publish failures gracefully (Requirement 2.7)
-        try:
-            self.publisher.publish_sensor_state("dose_rate", measurement.dose_rate)
-        except Exception as e:
-            logger.error(f"Failed to publish dose_rate: {e}")
+        # Publish core sensor states to MQTT (Requirement 3.3)
+        self._publish_sensor_safe("dose_rate", measurement.dose_rate)
+        self._publish_sensor_safe("cpm", measurement.tube_rate)
+        self._publish_sensor_safe("total_pulses", measurement.tube_pulse_count)
+        self._publish_sensor_safe("battery_voltage", measurement.battery_voltage)
+        self._publish_sensor_safe("tube_lifetime", measurement.tube_lifetime)
 
-        try:
-            self.publisher.publish_sensor_state("cpm", measurement.tube_rate)
-        except Exception as e:
-            logger.error(f"Failed to publish cpm: {e}")
+        # Publish advanced sensors if enabled and available
+        if self.config.enable_advanced_sensors:
+            if tube_dead_time is not None:
+                self._publish_sensor_safe("tube_dead_time", tube_dead_time)
+            if tube_dead_time_compensation is not None:
+                self._publish_sensor_safe(
+                    "tube_dead_time_compensation", tube_dead_time_compensation
+                )
+            if tube_hv_duty_cycle is not None:
+                self._publish_sensor_safe("hv_duty_cycle", tube_hv_duty_cycle)
+            if tube_hv_frequency is not None:
+                self._publish_sensor_safe("hv_frequency", tube_hv_frequency)
 
-        try:
-            self.publisher.publish_sensor_state("total_pulses", measurement.tube_pulse_count)
-        except Exception as e:
-            logger.error(f"Failed to publish total_pulses: {e}")
-
-        try:
-            self.publisher.publish_sensor_state("battery_voltage", measurement.battery_voltage)
-        except Exception as e:
-            logger.error(f"Failed to publish battery_voltage: {e}")
-
-        try:
-            self.publisher.publish_sensor_state("tube_lifetime", measurement.tube_lifetime)
-        except Exception as e:
-            logger.error(f"Failed to publish tube_lifetime: {e}")
+        # Publish moving averages if available
+        if self.config.enable_pulse_tracking:
+            if cpm_1min is not None:
+                self._publish_sensor_safe("cpm_1min", cpm_1min)
+            if cpm_5min is not None:
+                self._publish_sensor_safe("cpm_5min", cpm_5min)
+            if cpm_15min is not None:
+                self._publish_sensor_safe("cpm_15min", cpm_15min)
 
         logger.debug("Sensor polling cycle completed")
 
         # Write health check file (Requirement 6.6)
         self._write_health_check()
+
+    def _publish_sensor_safe(self, sensor_name: str, value: float | int) -> None:
+        """Safely publish a sensor value, handling errors gracefully.
+
+        Args:
+            sensor_name: Name of the sensor
+            value: Sensor value to publish
+        """
+        try:
+            self.publisher.publish_sensor_state(sensor_name, value)
+        except Exception as e:
+            logger.error(f"Failed to publish {sensor_name}: {e}")
 
     def _write_health_check(self) -> None:
         """Write health check timestamp to file.

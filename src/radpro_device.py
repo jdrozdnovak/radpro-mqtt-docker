@@ -433,3 +433,164 @@ class RadProDevice:
         except ValueError as e:
             logger.error(f"Error parsing tube lifetime response '{response}': {e}")
             return None
+
+    def get_tube_dead_time(self) -> float | None:
+        """Get tube dead time measurement in microseconds.
+
+        The dead time is the period after a detection event during which
+        the tube cannot detect another event. This affects measurement
+        accuracy at high count rates.
+
+        Returns:
+            Optional[float]: Tube dead time in microseconds, or None if the command fails
+        """
+        response = self.send_command("GET tubeDeadTime")
+
+        if response is None:
+            logger.error("Failed to get tube dead time: no response")
+            return None
+
+        try:
+            dead_time = float(response)
+            logger.debug(f"Tube dead time retrieved: {dead_time} µs")
+            return dead_time
+
+        except ValueError as e:
+            logger.error(f"Error parsing tube dead time response '{response}': {e}")
+            return None
+
+    def get_tube_dead_time_compensation(self) -> float | None:
+        """Get tube dead time compensation value in seconds.
+
+        This is the correction factor applied to measurements to compensate
+        for dead time losses at high count rates.
+
+        Returns:
+            Optional[float]: Dead time compensation in seconds, or None if the command fails
+        """
+        response = self.send_command("GET tubeDeadTimeCompensation")
+
+        if response is None:
+            logger.error("Failed to get tube dead time compensation: no response")
+            return None
+
+        try:
+            compensation = float(response)
+            logger.debug(f"Tube dead time compensation retrieved: {compensation} s")
+            return compensation
+
+        except ValueError as e:
+            logger.error(f"Error parsing dead time compensation response '{response}': {e}")
+            return None
+
+    def get_tube_hv_duty_cycle(self) -> float | None:
+        """Get high voltage generator PWM duty cycle as a percentage.
+
+        The duty cycle indicates the high voltage generator's operating state.
+        Values closer to 100% may indicate the tube is approaching its voltage limit.
+
+        Returns:
+            Optional[float]: HV duty cycle as percentage (0-100), or None if the command fails
+        """
+        response = self.send_command("GET tubeHVDutyCycle")
+
+        if response is None:
+            logger.error("Failed to get HV duty cycle: no response")
+            return None
+
+        try:
+            duty_cycle = float(response)
+            logger.debug(f"HV duty cycle retrieved: {duty_cycle}%")
+            return duty_cycle
+
+        except ValueError as e:
+            logger.error(f"Error parsing HV duty cycle response '{response}': {e}")
+            return None
+
+    def get_tube_hv_frequency(self) -> float | None:
+        """Get high voltage generator PWM frequency in Hz.
+
+        The frequency of the PWM signal used to generate the high voltage
+        for the Geiger-Müller tube.
+
+        Returns:
+            Optional[float]: HV frequency in Hz, or None if the command fails
+        """
+        response = self.send_command("GET tubeHVFrequency")
+
+        if response is None:
+            logger.error("Failed to get HV frequency: no response")
+            return None
+
+        try:
+            frequency = float(response)
+            logger.debug(f"HV frequency retrieved: {frequency} Hz")
+            return frequency
+
+        except ValueError as e:
+            logger.error(f"Error parsing HV frequency response '{response}': {e}")
+            return None
+
+    def get_device_time(self) -> int | None:
+        """Get device's internal time as Unix timestamp.
+
+        Returns:
+            Optional[int]: Unix timestamp, or None if the command fails
+        """
+        response = self.send_command("GET deviceTime")
+
+        if response is None:
+            logger.error("Failed to get device time: no response")
+            return None
+
+        try:
+            device_time = int(response)
+            logger.debug(f"Device time retrieved: {device_time}")
+            return device_time
+
+        except ValueError as e:
+            logger.error(f"Error parsing device time response '{response}': {e}")
+            return None
+
+    def sync_time(self) -> bool:
+        """Synchronize device time with system time.
+
+        Sets the device's internal clock to match the system time,
+        including timezone offset. This ensures accurate timestamps
+        in the device's datalog.
+
+        Returns:
+            bool: True if time sync successful, False otherwise
+        """
+        import time
+
+        try:
+            current_time = int(time.time())
+
+            # Calculate timezone offset
+            if time.localtime().tm_isdst:
+                current_timezone = time.altzone
+            else:
+                current_timezone = time.timezone
+
+            # Convert to decimal hours (RadPro expects format like -5.0 for EST)
+            timezone_hours = -current_timezone / 3600.0
+
+            # Set device time
+            time_response = self.send_command(f"SET deviceTime {current_time}")
+            if time_response is None:
+                logger.error("Failed to set device time")
+                return False
+
+            # Set device timezone
+            tz_response = self.send_command(f"SET deviceTimeZone {timezone_hours:.1f}")
+            if tz_response is None:
+                logger.error("Failed to set device timezone")
+                return False
+
+            logger.info(f"Device time synchronized: {current_time} (TZ: {timezone_hours:+.1f}h)")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error syncing device time: {e}")
+            return False
