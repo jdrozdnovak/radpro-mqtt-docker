@@ -20,8 +20,10 @@ class TestHealthCheck:
 
         Requirements: 6.6
         """
-        # Create mock config
+        # Create mock config with new attributes
         config = MagicMock(spec=Config)
+        config.enable_pulse_tracking = False  # Disable to avoid PulseTracker initialization
+        config.enable_advanced_sensors = False
 
         # Create bridge instance
         bridge = RadProBridge(config=config)
@@ -58,8 +60,10 @@ class TestHealthCheck:
 
         Requirements: 6.6
         """
-        # Create mock config
+        # Create mock config with new attributes
         config = MagicMock(spec=Config)
+        config.enable_pulse_tracking = False  # Disable to avoid PulseTracker initialization
+        config.enable_advanced_sensors = False
 
         # Create bridge instance
         bridge = RadProBridge(config=config)
@@ -79,8 +83,11 @@ class TestHealthCheck:
 
         Requirements: 6.6
         """
-        # Create mock config
+        # Create mock config with new attributes
         config = MagicMock(spec=Config)
+        config.enable_pulse_tracking = False  # Disable to avoid PulseTracker initialization
+        config.enable_advanced_sensors = False
+        config.sync_device_time = False
 
         # Create bridge instance
         bridge = RadProBridge(config=config)
@@ -115,8 +122,11 @@ class TestHealthCheck:
 
         Requirements: 6.6
         """
-        # Create mock config
+        # Create mock config with new attributes
         config = MagicMock(spec=Config)
+        config.enable_pulse_tracking = False  # Disable to avoid PulseTracker initialization
+        config.enable_advanced_sensors = False
+        config.sync_device_time = False
 
         # Create bridge instance
         bridge = RadProBridge(config=config)
