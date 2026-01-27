@@ -5,8 +5,6 @@ Tests the pulse tracking and moving average calculation functionality.
 
 import time
 
-import pytest
-
 from src.pulse_tracker import PulseDataPoint, PulseTracker
 
 
@@ -94,7 +92,8 @@ class TestPulseTrackerMeasurements:
         tracker.add_measurement(pulse_count=200, timestamp=base_time + 300)
 
         # Old measurements should be cleaned up
-        # Max history is 120 seconds, so measurements older than (base_time + 300 - 120) should be gone
+        # Max history is 120 seconds, so measurements older than
+        # (base_time + 300 - 120) should be gone
         assert tracker.get_history_size() < 10
 
 
