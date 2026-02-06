@@ -37,7 +37,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest==9.0.2",
-    "hypothesis==6.150.3",
+    "hypothesis==6.151.5",
     "pytest-mock==3.15.1",
     "black==26.1.0",
     "mypy==1.19.1",
