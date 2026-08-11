@@ -35,14 +35,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Note: paho-mqtt 2.x ships its own type hints, so no types-paho-mqtt stubs -
+# the 1.6 stubs would shadow them and type-check against the old callback API.
 dev = [
-    "pytest==9.0.2",
-    "hypothesis==6.150.3",
+    "pytest==9.1.1",
+    "hypothesis==6.165.3",
     "pytest-mock==3.15.1",
-    "black==26.1.0",
-    "mypy==1.19.1",
-    "ruff==0.14.14",
-    "types-paho-mqtt==1.6.0.20240321",
+    "black==26.5.1",
+    "mypy==2.3.0",
+    "ruff==0.16.2",
 ]
 
 [project.urls]
@@ -106,7 +107,7 @@ warn_unused_ignores = true
 warn_no_return = true
 warn_unreachable = true
 strict_equality = true
-strict_concatenate = true
+extra_checks = true
 
 [[tool.mypy.overrides]]
 module = "serial.*"
@@ -140,12 +141,13 @@ exclude_lines = [
 ]
 
 [dependency-groups]
+# Kept in sync with [project.optional-dependencies].dev so `uv sync` and
+# `uv pip install -e ".[dev]"` install the same tool versions as CI.
 dev = [
-    "black>=23.12.1",
-    "hypothesis>=6.92.1",
-    "mypy>=1.7.1",
-    "pytest>=7.4.3",
-    "pytest-mock>=3.12.0",
-    "ruff>=0.1.8",
-    "types-paho-mqtt>=1.6.0.20240106",
+    "black==26.5.1",
+    "hypothesis==6.165.3",
+    "mypy==2.3.0",
+    "pytest==9.1.1",
+    "pytest-mock==3.15.1",
+    "ruff==0.16.2",
 ]

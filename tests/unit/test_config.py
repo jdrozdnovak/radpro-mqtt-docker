@@ -222,3 +222,103 @@ class TestConfigIntegration:
         config = Config.from_env()
         with pytest.raises(ValueError, match="MQTT_PORT must be between 1 and 65535"):
             config.validate()
+
+
+class TestReliabilityConfig:
+    """Tests for the self-healing configuration."""
+
+    def test_watchdog_timeout_defaults_to_five_poll_intervals(self):
+        """Test that the watchdog scales with the polling interval."""
+        config = Config(mqtt_host="mqtt.example.com", poll_interval=120)
+
+        assert config.effective_watchdog_timeout == 600
+
+    def test_watchdog_timeout_has_a_floor(self):
+        """Test that a fast poll interval keeps a sane watchdog timeout.
+
+        With a 10 second interval, five cycles is under a minute - short
+        enough that a brief broker hiccup would restart the container.
+        """
+        config = Config(mqtt_host="mqtt.example.com", poll_interval=10)
+
+        assert config.effective_watchdog_timeout == 300
+
+    def test_explicit_watchdog_timeout_wins(self):
+        """Test that WATCHDOG_TIMEOUT overrides the derived value."""
+        config = Config(mqtt_host="mqtt.example.com", poll_interval=60, watchdog_timeout=900)
+
+        assert config.effective_watchdog_timeout == 900
+
+    def test_reliability_settings_from_env(self, monkeypatch):
+        """Test that the reliability settings are read from the environment."""
+        monkeypatch.setenv("MQTT_HOST", "mqtt.example.com")
+        monkeypatch.setenv("WATCHDOG_TIMEOUT", "900")
+        monkeypatch.setenv("MAX_CONSECUTIVE_FAILURES", "3")
+        monkeypatch.setenv("PUBLISH_ACK_TIMEOUT", "5.5")
+        monkeypatch.setenv("MQTT_KEEPALIVE", "30")
+        monkeypatch.setenv("MQTT_CLIENT_ID", "my-bridge")
+        monkeypatch.setenv("HEALTH_FILE", "/var/run/health")
+
+        config = Config.from_env()
+        config.validate()
+
+        assert config.watchdog_timeout == 900
+        assert config.max_consecutive_failures == 3
+        assert config.publish_ack_timeout == 5.5
+        assert config.mqtt_keepalive == 30
+        assert config.effective_client_id == "my-bridge"
+        assert config.health_file == "/var/run/health"
+
+    def test_client_id_defaults_to_a_host_specific_value(self):
+        """Test that the default client id is not shared between hosts."""
+        config = Config(mqtt_host="mqtt.example.com")
+
+        assert config.effective_client_id.startswith("radpro-mqtt-bridge-")
+        assert config.effective_client_id != "radpro-mqtt-bridge"
+
+    def test_validate_rejects_watchdog_shorter_than_poll_interval(self):
+        """Test that a watchdog which cannot be satisfied is rejected.
+
+        Restarting before a single cycle can complete would turn the bridge
+        into a restart loop.
+        """
+        config = Config(mqtt_host="mqtt.example.com", poll_interval=60, watchdog_timeout=30)
+
+        with pytest.raises(ValueError, match="must be greater than"):
+            config.validate()
+
+    def test_validate_rejects_negative_watchdog_timeout(self):
+        """Test that a negative watchdog timeout is rejected."""
+        config = Config(mqtt_host="mqtt.example.com", watchdog_timeout=-1)
+
+        with pytest.raises(ValueError, match="WATCHDOG_TIMEOUT must be non-negative"):
+            config.validate()
+
+    def test_validate_rejects_zero_consecutive_failures(self):
+        """Test that MAX_CONSECUTIVE_FAILURES must allow at least one failure."""
+        config = Config(mqtt_host="mqtt.example.com", max_consecutive_failures=0)
+
+        with pytest.raises(ValueError, match="MAX_CONSECUTIVE_FAILURES must be at least 1"):
+            config.validate()
+
+    def test_validate_rejects_short_keepalive(self):
+        """Test that an unusably short MQTT keepalive is rejected."""
+        config = Config(mqtt_host="mqtt.example.com", mqtt_keepalive=1)
+
+        with pytest.raises(ValueError, match="MQTT_KEEPALIVE must be at least 5"):
+            config.validate()
+
+    def test_validate_rejects_non_positive_ack_timeout(self):
+        """Test that a non-positive publish acknowledgement timeout is rejected."""
+        config = Config(mqtt_host="mqtt.example.com", publish_ack_timeout=0)
+
+        with pytest.raises(ValueError, match="PUBLISH_ACK_TIMEOUT must be positive"):
+            config.validate()
+
+    def test_invalid_watchdog_timeout_value(self, monkeypatch):
+        """Test that a non-numeric WATCHDOG_TIMEOUT is rejected."""
+        monkeypatch.setenv("MQTT_HOST", "mqtt.example.com")
+        monkeypatch.setenv("WATCHDOG_TIMEOUT", "soon")
+
+        with pytest.raises(ValueError, match="Invalid WATCHDOG_TIMEOUT"):
+            Config.from_env()

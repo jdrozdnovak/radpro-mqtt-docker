@@ -6,7 +6,9 @@ pulse tracking, and the main polling loop.
 """
 
 import logging
+import os
 import signal
+import threading
 import time
 from datetime import datetime
 
@@ -17,6 +19,22 @@ from src.pulse_tracker import PulseTracker
 from src.radpro_device import RadProDevice
 
 logger = logging.getLogger(__name__)
+
+# Process exit codes. Anything non-zero tells the container supervisor
+# (docker restart policy / systemd) to restart the bridge.
+EXIT_OK = 0
+EXIT_SETUP_FAILED = 1
+EXIT_WATCHDOG_TRIPPED = 2
+
+# Retries used when recovering the device mid-run. Deliberately small: a
+# recovery attempt that blocks for minutes would starve the polling loop and
+# the watchdog, and the next cycle retries anyway.
+RECOVERY_RETRIES = 2
+
+# How often the hard watchdog thread checks for progress, and how much longer
+# than the polling-loop watchdog it waits before force-exiting the process.
+WATCHDOG_CHECK_INTERVAL = 15.0
+HARD_WATCHDOG_FACTOR = 2
 
 
 class RadProBridge:
@@ -45,7 +63,12 @@ class RadProBridge:
         self.config = config
         self._device_info: DeviceInfo | None = None
         self._shutdown_requested = False
+        # Set alongside _shutdown_requested so sleeping threads wake up at
+        # once instead of running out their timeout
+        self._shutdown_event = threading.Event()
         self._last_time_sync: float = 0.0
+        self._last_successful_publish: float = 0.0
+        self._consecutive_failures = 0
 
         # Create RadProDevice instance (Requirement 6.1)
         self.device = RadProDevice(
@@ -137,21 +160,53 @@ class RadProBridge:
         logger.info("Publishing online availability status...")
         self.publisher.publish_availability("online")
 
+        # Step 6: From now on, re-announce the device after every reconnect.
+        # Registered here (rather than in __init__) so the initial announcement
+        # above isn't duplicated by the callback for the first connection.
+        self.publisher.on_connected = self._on_mqtt_connected
+
+        # Give the watchdog a starting point: setup succeeded just now
+        self._last_successful_publish = time.time()
+
         logger.info("Bridge setup completed successfully")
         return True
 
-    def poll_and_publish(self) -> None:
+    def _on_mqtt_connected(self) -> None:
+        """Re-announce the device after the MQTT connection is re-established.
+
+        Called from the MQTT network thread. Retained discovery and
+        availability messages are lost if the broker restarts without
+        persistence, which leaves Home Assistant showing the sensors as
+        unavailable even though the bridge is publishing again.
+
+        Must not wait for broker acknowledgements: this runs on the thread that
+        would have to process them.
+        """
+        if self._device_info is None:
+            return
+
+        logger.info("MQTT reconnected, re-publishing discovery and availability")
+        self.publisher.publish_discovery(self._device_info)
+        self.publisher.publish_availability("online")
+
+    def poll_and_publish(self) -> bool:
         """Poll device and publish sensor data to MQTT.
 
         Polls all sensors from the RadPro device, creates a RadiationMeasurement
         object, and publishes sensor states to MQTT. Individual sensor failures
         are handled gracefully - if one sensor fails, the others are still published.
 
+        Returns:
+            bool: True only if the core measurements were published *and*
+                acknowledged by the broker. This is the signal the watchdog
+                uses, so it must never report success for data that did not
+                actually leave the process.
+
         Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 3.3
         """
         if self._device_info is None:
             logger.error("Cannot poll: device information not available")
-            return
+            return False
 
         logger.debug("Starting sensor polling cycle...")
 
@@ -168,22 +223,22 @@ class RadProBridge:
         tube_rate = self.device.get_tube_rate()
         if tube_rate is None:
             logger.warning("Failed to get tube rate, skipping this polling cycle")
-            return
+            return False
 
         tube_pulse_count = self.device.get_tube_pulse_count()
         if tube_pulse_count is None:
             logger.warning("Failed to get tube pulse count, skipping this polling cycle")
-            return
+            return False
 
         battery_voltage = self.device.get_battery_voltage()
         if battery_voltage is None:
             logger.warning("Failed to get battery voltage, skipping this polling cycle")
-            return
+            return False
 
         tube_sensitivity = self.device.get_tube_sensitivity()
         if tube_sensitivity is None:
             logger.warning("Failed to get tube sensitivity, skipping this polling cycle")
-            return
+            return False
 
         tube_lifetime = self.device.get_tube_lifetime()
         if tube_lifetime is None:
@@ -245,11 +300,13 @@ class RadProBridge:
         )
 
         # Publish core sensor states to MQTT (Requirement 3.3)
-        self._publish_sensor_safe("dose_rate", measurement.dose_rate)
-        self._publish_sensor_safe("cpm", measurement.tube_rate)
-        self._publish_sensor_safe("total_pulses", measurement.tube_pulse_count)
-        self._publish_sensor_safe("battery_voltage", measurement.battery_voltage)
-        self._publish_sensor_safe("tube_lifetime", measurement.tube_lifetime)
+        core_published = [
+            self._publish_sensor_safe("dose_rate", measurement.dose_rate),
+            self._publish_sensor_safe("cpm", measurement.tube_rate),
+            self._publish_sensor_safe("total_pulses", measurement.tube_pulse_count),
+            self._publish_sensor_safe("battery_voltage", measurement.battery_voltage),
+            self._publish_sensor_safe("tube_lifetime", measurement.tube_lifetime),
+        ]
 
         # Publish advanced sensors if enabled and available
         if self.config.enable_advanced_sensors:
@@ -275,102 +332,217 @@ class RadProBridge:
 
         logger.debug("Sensor polling cycle completed")
 
-        # Write health check file (Requirement 6.6)
-        self._write_health_check()
+        if not all(core_published):
+            logger.warning("Core sensor values could not be published to MQTT")
+            return False
 
-    def _publish_sensor_safe(self, sensor_name: str, value: float | int) -> None:
+        # A successful publish() only means the message was queued. Wait for
+        # the broker to acknowledge it, otherwise a dead network thread or a
+        # black-holed socket would still look like a healthy cycle.
+        if not self.publisher.wait_for_delivery(self.config.publish_ack_timeout):
+            logger.warning("MQTT broker did not acknowledge this cycle's data")
+            return False
+
+        # Record the successful cycle (Requirement 6.6)
+        self._last_successful_publish = time.time()
+        self._write_health_check()
+        return True
+
+    def _publish_sensor_safe(self, sensor_name: str, value: float | int) -> bool:
         """Safely publish a sensor value, handling errors gracefully.
 
         Args:
             sensor_name: Name of the sensor
             value: Sensor value to publish
+
+        Returns:
+            bool: True if the value was accepted for delivery
         """
         try:
-            self.publisher.publish_sensor_state(sensor_name, value)
+            return bool(self.publisher.publish_sensor_state(sensor_name, value))
         except Exception as e:
             logger.error(f"Failed to publish {sensor_name}: {e}")
+            return False
 
     def _write_health_check(self) -> None:
         """Write health check timestamp to file.
 
-        Writes the current timestamp to /tmp/health after each successful poll.
-        This file is used by Docker health checks to verify the application
-        is running correctly.
+        Writes the current timestamp to the health file after each successful
+        publish. This file is used by the Docker health check to verify the
+        bridge is still delivering data.
+
+        The file is written atomically so a health check that runs mid-write
+        never sees a truncated timestamp.
 
         Requirements: 6.6
         """
+        path = self.config.health_file
         try:
-            import time
-
             timestamp = time.time()
-            with open("/tmp/health", "w") as f:
+            tmp_path = f"{path}.tmp"
+            with open(tmp_path, "w") as f:
                 f.write(f"{timestamp}\n")
+            os.replace(tmp_path, path)
             logger.debug(f"Health check file updated: {timestamp}")
         except Exception as e:
             logger.warning(f"Failed to write health check file: {e}")
 
-    def run(self) -> None:
+    def _clear_health_check(self) -> None:
+        """Remove a stale health file left behind by a previous run.
+
+        A restarted container keeps its filesystem, so an old timestamp must
+        not be able to make a bridge that never finished starting up look
+        healthy.
+        """
+        try:
+            os.unlink(self.config.health_file)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            logger.warning(f"Failed to remove stale health check file: {e}")
+
+    def _recover_connections(self) -> None:
+        """Try to recover after repeated polling failures.
+
+        A USB serial port can stay open while the device has stopped answering,
+        so the port being "connected" is not evidence that it works - force a
+        reconnect instead of trusting is_connected().
+        """
+        logger.warning(
+            f"{self._consecutive_failures} consecutive failed cycles, "
+            "attempting to recover connections"
+        )
+
+        # Reset first, so recovery runs periodically rather than on every
+        # single cycle. The watchdog is the backstop if it never succeeds.
+        self._consecutive_failures = 0
+
+        if not self.publisher.is_connected():
+            # The failures are explained by MQTT, which reconnects on its own.
+            # Cycling the serial port here would only add churn to a device
+            # that is working fine.
+            logger.warning("MQTT is disconnected; waiting for its automatic reconnect")
+            return
+
+        if self.device.reconnect(
+            max_retries=RECOVERY_RETRIES,
+            backoff_base=self.config.retry_backoff_base,
+        ):
+            logger.info("Device reconnected successfully")
+            device_info = self.device.get_device_id()
+            if device_info is not None:
+                self._device_info = device_info
+            else:
+                logger.error("Device reconnected but did not return its device ID")
+        else:
+            logger.error("Failed to reconnect to device")
+
+    def _start_hard_watchdog(self, timeout: float) -> None:
+        """Start a daemon thread that force-exits a wedged process.
+
+        The watchdog check in the polling loop only runs if the loop is still
+        turning. It cannot help when the main thread is stuck for good - a USB
+        read blocked in the kernel after a controller glitch, or a lock held by
+        a thread that died. This thread has no such dependency: it force-exits
+        the process so the container supervisor restarts it, and the MQTT Last
+        Will tells Home Assistant the bridge went offline.
+
+        Args:
+            timeout: Seconds without a successful publish before force-exiting
+        """
+
+        def _watch() -> None:
+            while not self._shutdown_requested:
+                if self._shutdown_event.wait(WATCHDOG_CHECK_INTERVAL):
+                    return
+
+                stalled_for = time.time() - self._last_successful_publish
+                if stalled_for > timeout:
+                    logger.critical(
+                        f"Hard watchdog: the bridge has been stuck for {stalled_for:.0f}s "
+                        f"(limit {timeout:.0f}s), force-exiting for a restart"
+                    )
+                    logging.shutdown()  # flush handlers, os._exit skips cleanup
+                    os._exit(EXIT_WATCHDOG_TRIPPED)
+
+        thread = threading.Thread(target=_watch, name="watchdog", daemon=True)
+        thread.start()
+        logger.info(f"Hard watchdog started (limit: {timeout:.0f}s)")
+
+    def _sleep_until_next_poll(self) -> None:
+        """Sleep for the poll interval, waking immediately on shutdown."""
+        self._shutdown_event.wait(self.config.poll_interval)
+
+    def run(self) -> int:
         """Main application loop.
 
         Calls setup() to initialize connections, then enters the polling loop
         with configurable interval. Handles errors and continues operation.
-        The loop runs until shutdown is requested via signal handler.
+        The loop runs until shutdown is requested via signal handler, or until
+        the watchdog decides the bridge is no longer delivering data.
+
+        Returns:
+            int: Process exit code. Non-zero asks the container supervisor for
+                a restart, which is the only reliable way out of a state the
+                process cannot repair itself (wedged USB stack, hung MQTT
+                client, device stuck not answering).
 
         Requirements: 2.1
         """
         logger.info("Starting RadPro MQTT Bridge...")
 
+        self._clear_health_check()
+
         # Call setup() (Requirement 2.1)
         if not self.setup():
-            logger.error("Setup failed, exiting")
-            return
+            logger.error("Setup failed, exiting so the supervisor can restart the bridge")
+            self.shutdown()
+            return EXIT_SETUP_FAILED
+
+        watchdog_timeout = self.config.effective_watchdog_timeout
+        self._start_hard_watchdog(watchdog_timeout * HARD_WATCHDOG_FACTOR)
 
         # Enter polling loop with configurable interval (Requirement 2.1)
-        logger.info(f"Entering polling loop (interval: {self.config.poll_interval}s)")
+        logger.info(
+            f"Entering polling loop (interval: {self.config.poll_interval}s, "
+            f"watchdog: {watchdog_timeout}s)"
+        )
 
         while not self._shutdown_requested:
             try:
-                # Poll and publish sensor data
-                self.poll_and_publish()
-
-                # Sleep for the configured poll interval
-                # Check shutdown flag more frequently to allow quick shutdown
-                sleep_interval = 1.0  # Check every second
-                elapsed = 0.0
-                while elapsed < self.config.poll_interval and not self._shutdown_requested:
-                    time.sleep(sleep_interval)
-                    elapsed += sleep_interval
+                if self.poll_and_publish():
+                    self._consecutive_failures = 0
+                else:
+                    self._consecutive_failures += 1
 
             except KeyboardInterrupt:
                 logger.info("Keyboard interrupt received, shutting down...")
                 break
             except Exception as e:
                 # Handle errors and continue operation (Requirement 2.1)
+                self._consecutive_failures += 1
                 logger.error(f"Error in polling loop: {e}", exc_info=True)
                 logger.info("Continuing operation after error...")
 
-                # Check if device is still connected, attempt reconnection if needed
-                if not self.device.is_connected():
-                    logger.warning("Device disconnected, attempting to reconnect...")
-                    if self.device.reconnect(
-                        max_retries=self.config.max_retries,
-                        backoff_base=self.config.retry_backoff_base,
-                    ):
-                        logger.info("Device reconnected successfully")
-                        # Re-retrieve device info after reconnection
-                        self._device_info = self.device.get_device_id()
-                    else:
-                        logger.error("Failed to reconnect to device")
+            if self._consecutive_failures >= self.config.max_consecutive_failures:
+                self._recover_connections()
 
-                # Check if MQTT is still connected
-                if not self.publisher.is_connected():
-                    logger.warning("MQTT disconnected, waiting for automatic reconnection...")
+            # Give up and let the supervisor restart us if data has not reached
+            # the broker for too long (Requirement 6.6)
+            stalled_for = time.time() - self._last_successful_publish
+            if stalled_for > watchdog_timeout:
+                logger.critical(
+                    f"Watchdog: no data reached the MQTT broker for {stalled_for:.0f}s "
+                    f"(limit {watchdog_timeout}s), exiting for a restart"
+                )
+                self.shutdown()
+                return EXIT_WATCHDOG_TRIPPED
 
-                # Sleep before next attempt
-                time.sleep(self.config.poll_interval)
+            self._sleep_until_next_poll()
 
         logger.info("Polling loop exited")
         self.shutdown()
+        return EXIT_OK
 
     def shutdown(self) -> None:
         """Graceful shutdown of the bridge.
@@ -384,13 +556,18 @@ class RadProBridge:
         """
         logger.info("Shutting down RadPro MQTT Bridge...")
 
+        # Stop the watchdog thread first: shutting down is not a stall
+        self._shutdown_requested = True
+        self._shutdown_event.set()
+
         # Step 1: Publish offline availability (Requirement 6.5)
         try:
             if self.publisher.is_connected():
                 logger.info("Publishing offline availability status...")
-                self.publisher.publish_availability("offline")
-                # Give time for the message to be sent
-                time.sleep(0.5)
+                if self.publisher.publish_availability("offline"):
+                    # Wait for the broker to acknowledge before closing the
+                    # socket, otherwise the status is lost on the way out
+                    self.publisher.wait_for_delivery(timeout=2.0)
         except Exception as e:
             logger.error(f"Error publishing offline status: {e}")
 
@@ -425,6 +602,7 @@ class RadProBridge:
         signal_name = signal.Signals(signum).name
         logger.info(f"Received signal {signal_name} ({signum}), initiating shutdown...")
         self._shutdown_requested = True
+        self._shutdown_event.set()
 
     def setup_signal_handlers(self) -> None:
         """Set up signal handlers for graceful shutdown.

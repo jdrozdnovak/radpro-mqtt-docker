@@ -4,11 +4,16 @@ This module provides the MQTTPublisher class for managing MQTT connections
 and publishing messages to an MQTT broker.
 """
 
+import json
 import logging
-import time
+import threading
+from collections.abc import Callable
 from typing import Any
 
 import paho.mqtt.client as mqtt
+from paho.mqtt.enums import CallbackAPIVersion
+from paho.mqtt.properties import Properties
+from paho.mqtt.reasoncodes import ReasonCode
 
 from src.config import Config
 from src.models import DeviceInfo, DevicePayload, DiscoveryPayload
@@ -110,8 +115,18 @@ class MQTTPublisher:
     This class handles connection management to an MQTT broker, including
     authentication, Last Will and Testament configuration, and message publishing.
 
+    Reconnection is delegated entirely to paho-mqtt: ``loop_start()`` runs a
+    network thread that re-establishes the connection with exponential backoff
+    whenever it is lost. Reconnecting by hand from a callback (or from the
+    polling thread) fights that thread for the socket and is a known way to
+    wedge the client into a state where it looks connected but never delivers
+    anything again.
+
     Attributes:
         config: Configuration object with MQTT settings
+        on_connected: Optional callback invoked from the network thread after
+            every successful (re)connection, used to re-announce discovery and
+            availability. It must not block waiting on broker acknowledgements.
     """
 
     def __init__(self, config: Config):
@@ -128,12 +143,19 @@ class MQTTPublisher:
         self.config = config
         self._client: mqtt.Client | None = None
         self._connected = False
-        self._reconnect_attempts = 0
-        self._max_reconnect_attempts = config.max_retries
-        self._should_reconnect = True
+        self._connect_result = threading.Event()
+        self._last_message_info: mqtt.MQTTMessageInfo | None = None
+        self.on_connected: Callable[[], None] | None = None
 
-        # Create MQTT client instance
-        self._client = mqtt.Client(client_id="radpro-mqtt-bridge", clean_session=True)
+        # Create MQTT client instance.
+        # reconnect_on_failure=True (the default) makes the loop_start() thread
+        # retry forever with the backoff set in connect().
+        self._client = mqtt.Client(
+            CallbackAPIVersion.VERSION2,
+            client_id=config.effective_client_id,
+            clean_session=True,
+            reconnect_on_failure=True,
+        )
 
         # Set up callbacks
         self._client.on_connect = self._on_connect
@@ -147,121 +169,80 @@ class MQTTPublisher:
             logger.debug(f"Configuring MQTT authentication for user: {config.mqtt_username}")
             self._client.username_pw_set(config.mqtt_username)
 
-        logger.debug(f"MQTTPublisher initialized: host={config.mqtt_host}, port={config.mqtt_port}")
+        logger.debug(
+            f"MQTTPublisher initialized: host={config.mqtt_host}, port={config.mqtt_port}, "
+            f"client_id={config.effective_client_id}"
+        )
 
-    def _on_connect(self, client: mqtt.Client, userdata: Any, flags: dict, rc: int) -> None:
+    def _on_connect(
+        self,
+        client: mqtt.Client,
+        userdata: Any,
+        connect_flags: mqtt.ConnectFlags,
+        reason_code: ReasonCode,
+        properties: Properties | None = None,
+    ) -> None:
         """Callback for when the client connects to the broker.
 
         Args:
             client: The MQTT client instance
             userdata: User data (unused)
-            flags: Response flags from the broker
-            rc: Connection result code
+            connect_flags: Flags from the broker's CONNACK
+            reason_code: Connection result reason code
+            properties: MQTT v5 properties (unused)
         """
-        if rc == 0:
-            self._connected = True
-            self._reconnect_attempts = 0  # Reset reconnection attempts on success
-            logger.info(
-                f"Connected to MQTT broker at " f"{self.config.mqtt_host}:{self.config.mqtt_port}"
-            )
-        else:
+        if reason_code.is_failure:
             self._connected = False
-            error_messages = {
-                1: "Connection refused - incorrect protocol version",
-                2: "Connection refused - invalid client identifier",
-                3: "Connection refused - server unavailable",
-                4: "Connection refused - bad username or password",
-                5: "Connection refused - not authorized",
-            }
-            error_msg = error_messages.get(rc, f"Connection refused - unknown error code {rc}")
-            logger.error(f"Failed to connect to MQTT broker: {error_msg}")
+            logger.error(f"Failed to connect to MQTT broker: {reason_code}")
+            # Unblock connect(); the network thread keeps retrying in the
+            # background, including for auth errors - credentials may be fixed
+            # on the broker without restarting this container.
+            self._connect_result.set()
+            return
 
-            # Handle authentication errors (Requirement 8.2)
-            if rc in [4, 5]:
-                logger.error("Authentication error detected - will not retry with same credentials")
-                self._should_reconnect = False
+        self._connected = True
+        logger.info(f"Connected to MQTT broker at {self.config.mqtt_host}:{self.config.mqtt_port}")
+        self._connect_result.set()
 
-    def _on_disconnect(self, client: mqtt.Client, userdata: Any, rc: int) -> None:
+        # Re-announce ourselves after every reconnect: a restarted broker may
+        # have lost the retained discovery and availability messages, which
+        # leaves the entities stuck as unavailable in Home Assistant.
+        if self.on_connected is not None:
+            try:
+                self.on_connected()
+            except Exception as e:
+                logger.error(f"Error in on_connected handler: {e}", exc_info=True)
+
+    def _on_disconnect(
+        self,
+        client: mqtt.Client,
+        userdata: Any,
+        disconnect_flags: mqtt.DisconnectFlags,
+        reason_code: ReasonCode,
+        properties: Properties | None = None,
+    ) -> None:
         """Callback for when the client disconnects from the broker.
+
+        This only records the state change. Reconnection is handled by the
+        paho-mqtt network thread started in connect(); doing it here would
+        block that very thread.
 
         Args:
             client: The MQTT client instance
             userdata: User data (unused)
-            rc: Disconnection result code
+            disconnect_flags: Flags describing the disconnect
+            reason_code: Disconnection reason code
+            properties: MQTT v5 properties (unused)
         """
         self._connected = False
-        if rc == 0:
-            logger.info("Disconnected from MQTT broker (clean disconnect)")
+
+        if reason_code.is_failure or disconnect_flags.is_disconnect_packet_from_server:
+            logger.warning(
+                f"Disconnected from MQTT broker unexpectedly ({reason_code}); "
+                "the client will reconnect automatically"
+            )
         else:
-            logger.warning(f"Disconnected from MQTT broker unexpectedly (code: {rc})")
-            # Trigger automatic reconnection for unexpected disconnects (Requirement 8.2)
-            if self._should_reconnect:
-                logger.info("Will attempt to reconnect to MQTT broker")
-                self._attempt_reconnect()
-
-    def _attempt_reconnect(self) -> None:
-        """Attempt to reconnect to MQTT broker with exponential backoff.
-
-        This method implements automatic reconnection with exponential backoff
-        when the connection is lost unexpectedly. It respects the maximum
-        retry limit and handles authentication errors appropriately.
-
-        Requirements: 8.2
-        """
-        if not self._should_reconnect:
-            logger.info("Reconnection disabled (authentication error or manual disconnect)")
-            return
-
-        if self._reconnect_attempts >= self._max_reconnect_attempts:
-            logger.error(
-                f"Maximum reconnection attempts ({self._max_reconnect_attempts}) reached. "
-                "Entering failed state."
-            )
-            return
-
-        # Calculate exponential backoff delay (Requirement 8.2)
-        delay = self.config.retry_backoff_base**self._reconnect_attempts
-        self._reconnect_attempts += 1
-
-        logger.info(
-            f"Attempting to reconnect to MQTT broker "
-            f"(attempt {self._reconnect_attempts}/{self._max_reconnect_attempts}) "
-            f"in {delay:.2f} seconds..."
-        )
-
-        # Wait before attempting reconnection
-        time.sleep(delay)
-
-        try:
-            # Attempt to reconnect
-            if self._client is None:
-                logger.error("Cannot reconnect: MQTT client not initialized")
-                return
-
-            logger.info(
-                f"Reconnecting to MQTT broker at "
-                f"{self.config.mqtt_host}:{self.config.mqtt_port}"
-            )
-
-            # The paho-mqtt client will automatically try to reconnect
-            # We just need to call reconnect() which uses the existing connection parameters
-            self._client.reconnect()
-
-            # Wait for connection to establish (with timeout)
-            timeout = 10  # seconds
-            start_time = time.time()
-            while not self._connected and (time.time() - start_time) < timeout:
-                time.sleep(0.1)
-
-            if self._connected:
-                logger.info("Successfully reconnected to MQTT broker")
-            else:
-                logger.warning("Reconnection attempt timed out")
-                # Will retry on next disconnect callback if still not connected
-
-        except Exception as e:
-            logger.error(f"Error during reconnection attempt: {e}")
-            # The disconnect callback will be triggered again if connection fails
+            logger.info("Disconnected from MQTT broker (clean disconnect)")
 
     def set_last_will(self) -> None:
         """Configure MQTT Last Will and Testament for availability.
@@ -285,13 +266,17 @@ class MQTTPublisher:
         except Exception as e:
             logger.error(f"Failed to set Last Will: {e}")
 
-    def connect(self) -> bool:
+    def connect(self, timeout: float = 10.0) -> bool:
         """Connect to the MQTT broker.
 
         Establishes a connection to the MQTT broker using the configured
         host, port, and authentication credentials. The Last Will and Testament
-        should be configured before calling this method. Enables automatic
-        reconnection on successful connection.
+        should be configured before calling this method. Starts the background
+        network thread, which keeps the connection alive and re-establishes it
+        automatically if it drops.
+
+        Args:
+            timeout: Seconds to wait for the broker's CONNACK
 
         Returns:
             bool: True if connection successful, False otherwise
@@ -303,39 +288,36 @@ class MQTTPublisher:
             return False
 
         try:
-            # Enable automatic reconnection for new connections
-            self._should_reconnect = True
-            self._reconnect_attempts = 0
+            self._connect_result.clear()
 
             logger.info(
                 f"Attempting to connect to MQTT broker at "
                 f"{self.config.mqtt_host}:{self.config.mqtt_port}"
             )
 
-            # Enable automatic reconnection in paho-mqtt
-            # This will automatically reconnect if connection is lost
-            self._client.reconnect_delay_set(min_delay=1, max_delay=120)
+            # Bound the automatic reconnect backoff of the network thread.
+            # Capping at 60s keeps an outage from turning into a 2-minute gap.
+            self._client.reconnect_delay_set(min_delay=1, max_delay=60)
 
             # Connect to broker (Requirement 3.1)
             self._client.connect(
-                host=self.config.mqtt_host, port=self.config.mqtt_port, keepalive=60
+                host=self.config.mqtt_host,
+                port=self.config.mqtt_port,
+                keepalive=self.config.mqtt_keepalive,
             )
 
             # Start network loop in background thread
             self._client.loop_start()
 
-            # Wait for connection to establish (with timeout)
-            timeout = 10  # seconds
-            start_time = time.time()
-            while not self._connected and (time.time() - start_time) < timeout:
-                time.sleep(0.1)
+            # Wait for the CONNACK to be processed by the network thread
+            self._connect_result.wait(timeout)
 
             if self._connected:
                 logger.info("Successfully connected to MQTT broker")
                 return True
-            else:
-                logger.error("Connection timeout: failed to connect to MQTT broker")
-                return False
+
+            logger.error("Failed to connect to MQTT broker within timeout")
+            return False
 
         except Exception as e:
             logger.error(f"Error connecting to MQTT broker: {e}")
@@ -346,8 +328,7 @@ class MQTTPublisher:
         """Disconnect from the MQTT broker.
 
         Gracefully disconnects from the MQTT broker and stops the network loop.
-        This method is safe to call even if not connected. Disables automatic
-        reconnection to prevent reconnection after intentional disconnect.
+        This method is safe to call even if not connected.
 
         Requirements: 3.1
         """
@@ -356,18 +337,16 @@ class MQTTPublisher:
             return
 
         try:
-            # Disable automatic reconnection for manual disconnect
-            self._should_reconnect = False
-
             if self._connected:
                 logger.info("Disconnecting from MQTT broker")
                 self._client.disconnect()
-                self._client.loop_stop()
                 self._connected = False
-                logger.info("Disconnected from MQTT broker")
             else:
                 logger.debug("Disconnect called but not connected to broker")
-                self._client.loop_stop()
+
+            # Always stop the network thread, otherwise it keeps reconnecting
+            self._client.loop_stop()
+            logger.info("Disconnected from MQTT broker")
         except Exception as e:
             logger.error(f"Error during disconnect: {e}")
             self._connected = False
@@ -375,12 +354,54 @@ class MQTTPublisher:
     def is_connected(self) -> bool:
         """Check if connected to the MQTT broker.
 
+        Combines our own view of the connection with the client's, so a socket
+        that paho has already given up on is never reported as usable.
+
         Returns:
             bool: True if connected, False otherwise
 
         Requirements: 3.1
         """
-        return self._connected
+        if self._client is None:
+            return False
+        return bool(self._connected and self._client.is_connected())
+
+    def wait_for_delivery(self, timeout: float = 10.0) -> bool:
+        """Wait for the broker to acknowledge the most recent publish.
+
+        Publishing is asynchronous: ``publish()`` only queues a message for the
+        network thread. Waiting for the QoS 1 acknowledgement is what proves
+        messages are actually reaching the broker - without it the bridge
+        cannot tell a healthy connection from a network thread that has died
+        or a socket that is silently black-holing data.
+
+        Must only be called from the polling thread: calling it from an MQTT
+        callback would block the very thread that processes acknowledgements.
+
+        Args:
+            timeout: Seconds to wait for the acknowledgement
+
+        Returns:
+            bool: True if the message was acknowledged (or nothing was
+                pending), False if it timed out or failed
+        """
+        message_info = self._last_message_info
+        if message_info is None:
+            return True
+
+        try:
+            # wait_for_publish() returns silently when it times out, so the
+            # acknowledgement has to be confirmed explicitly afterwards
+            message_info.wait_for_publish(timeout)
+            if message_info.is_published():
+                return True
+            logger.error(f"Publish was not acknowledged by the broker within {timeout}s")
+            return False
+        except (RuntimeError, ValueError) as e:
+            logger.error(f"Publish failed: {e}")
+            return False
+        finally:
+            self._last_message_info = None
 
     def get_state_topic(self, sensor_type: str) -> str:
         """Construct state topic for a sensor.
@@ -490,27 +511,30 @@ class MQTTPublisher:
 
         return discovery_payload
 
-    def publish_discovery(self, device_info: DeviceInfo) -> None:
+    def publish_discovery(self, device_info: DeviceInfo) -> bool:
         """Publish Home Assistant discovery payloads for all sensors.
 
         Publishes discovery configuration messages for all defined sensors
         to enable Home Assistant auto-discovery. Each sensor gets its own
         discovery topic following the Home Assistant MQTT Discovery format.
-        Automatically reconnects if connection is lost.
 
         Args:
             device_info: Device identification information
 
+        Returns:
+            bool: True if every discovery payload was handed to the client
+
         Requirements: 4.1, 4.2
         """
-        # Ensure we're connected before publishing
-        if not self._ensure_connected() or self._client is None:
+        if not self.is_connected() or self._client is None:
             logger.error("Cannot publish discovery: not connected to MQTT broker")
-            return
+            return False
 
         logger.info(
             f"Publishing Home Assistant discovery payloads for device {device_info.device_id}"
         )
+
+        success = True
 
         # Publish discovery payload for each sensor (Requirement 4.1)
         for sensor_type in SENSORS.keys():
@@ -532,122 +556,90 @@ class MQTTPublisher:
                 if result.rc == mqtt.MQTT_ERR_SUCCESS:
                     logger.debug(f"Published discovery for {sensor_type} to {topic}")
                 else:
+                    success = False
                     logger.error(
                         f"Failed to publish discovery for {sensor_type}: " f"error code {result.rc}"
                     )
 
             except Exception as e:
+                success = False
                 logger.error(f"Error publishing discovery for {sensor_type}: {e}")
 
         logger.info(f"Completed publishing discovery payloads for {len(SENSORS)} sensors")
+        return success
 
-    def _ensure_connected(self) -> bool:
-        """Ensure MQTT connection is active, reconnect if needed.
-
-        Checks if the client is connected and attempts to reconnect if not.
-        This provides resilience against transient connection losses.
-
-        Returns:
-            bool: True if connected (or successfully reconnected), False otherwise
-        """
-        if self._client is None:
-            logger.error("MQTT client not initialized")
-            return False
-
-        # Check if already connected
-        if self._connected and self._client.is_connected():
-            return True
-
-        # Not connected, attempt to reconnect
-        logger.warning("MQTT connection lost, attempting to reconnect...")
-
-        try:
-            # Try to reconnect
-            self._client.reconnect()
-
-            # Wait briefly for reconnection
-            timeout = 5  # seconds
-            start_time = time.time()
-            while not self._connected and (time.time() - start_time) < timeout:
-                time.sleep(0.1)
-
-            if self._connected:
-                logger.info("Successfully reconnected to MQTT broker")
-                return True
-            else:
-                logger.error("Failed to reconnect to MQTT broker")
-                return False
-
-        except Exception as e:
-            logger.error(f"Error during reconnection: {e}")
-            return False
-
-    def publish_sensor_state(self, sensor: str, value: Any) -> None:
+    def publish_sensor_state(self, sensor: str, value: Any) -> bool:
         """Publish sensor state to MQTT.
 
         Publishes a sensor's current value to its state topic in JSON format.
         The value is serialized to JSON and published to the sensor's state topic.
-        Automatically reconnects if connection is lost.
+
+        Readings are dropped rather than queued while the broker is
+        unreachable: a Geiger reading that arrives minutes late is worthless,
+        and queueing them would grow without bound during an outage.
 
         Args:
             sensor: The sensor type (e.g., "dose_rate", "cpm")
             value: The sensor value to publish (will be JSON serialized)
 
+        Returns:
+            bool: True if the message was accepted by the client for delivery
+
         Requirements: 3.3
         """
-        # Ensure we're connected before publishing
-        if not self._ensure_connected() or self._client is None:
-            logger.error(f"Cannot publish sensor state for {sensor}: not connected to MQTT broker")
-            return
+        if not self.is_connected() or self._client is None:
+            # Debug level on purpose: during an outage this would otherwise be
+            # one error line per sensor per cycle. The caller logs the failed
+            # cycle once.
+            logger.debug(f"Cannot publish sensor state for {sensor}: not connected to MQTT broker")
+            return False
 
         try:
             # Get the state topic for this sensor
             topic = self.get_state_topic(sensor)
 
             # Serialize value to JSON (Requirement 3.3)
-            import json
-
             payload = json.dumps(value)
 
             # Publish to state topic
             result = self._client.publish(topic=topic, payload=payload, qos=1, retain=False)
 
             if result.rc == mqtt.MQTT_ERR_SUCCESS:
+                # Remember the handle so the caller can confirm the broker
+                # actually acknowledged this cycle's data
+                self._last_message_info = result
                 logger.debug(f"Published state for {sensor} to {topic}: {payload}")
-            else:
-                logger.error(
-                    f"Failed to publish state for {sensor} to {topic}: error code {result.rc}"
-                )
+                return True
+
+            logger.error(f"Failed to publish state for {sensor} to {topic}: error code {result.rc}")
+            return False
 
         except Exception as e:
             logger.error(f"Error publishing sensor state for {sensor}: {e}")
+            return False
 
-    def publish_availability(self, status: str) -> None:
+    def publish_availability(self, status: str) -> bool:
         """Publish availability status to MQTT.
 
         Publishes the bridge's availability status (online/offline) to the
         availability topic. This is used by Home Assistant to determine if
-        the device is reachable. Automatically reconnects if connection is lost.
+        the device is reachable.
 
         Args:
             status: Availability status ("online" or "offline")
+
+        Returns:
+            bool: True if the message was accepted by the client for delivery
 
         Requirements: 3.2, 3.4
         """
         if self._client is None:
             logger.error("Cannot publish availability: MQTT client not initialized")
-            return
+            return False
 
-        # For offline status, don't try to reconnect (we're shutting down)
-        if status == "offline":
-            if not self.is_connected():
-                logger.warning("Cannot publish offline status: not connected")
-                return
-        else:
-            # For online status, ensure we're connected
-            if not self._ensure_connected():
-                logger.error("Cannot publish availability: not connected to MQTT broker")
-                return
+        if not self.is_connected():
+            logger.warning(f"Cannot publish availability '{status}': not connected to MQTT broker")
+            return False
 
         try:
             # Get the availability topic
@@ -657,11 +649,15 @@ class MQTTPublisher:
             result = self._client.publish(topic=topic, payload=status, qos=1, retain=True)
 
             if result.rc == mqtt.MQTT_ERR_SUCCESS:
+                self._last_message_info = result
                 logger.info(f"Published availability status: {status}")
-            else:
-                logger.error(
-                    f"Failed to publish availability status to {topic}: error code {result.rc}"
-                )
+                return True
+
+            logger.error(
+                f"Failed to publish availability status to {topic}: error code {result.rc}"
+            )
+            return False
 
         except Exception as e:
             logger.error(f"Error publishing availability status: {e}")
+            return False

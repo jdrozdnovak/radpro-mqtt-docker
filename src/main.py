@@ -25,7 +25,8 @@ def main() -> int:
     4. Handles top-level exceptions
 
     Returns:
-        int: Exit code (0 for success, 1 for failure)
+        int: Exit code (0 for a clean shutdown, non-zero for a failure or a
+            watchdog-triggered restart request)
 
     Requirements: 6.1, 6.3, 6.4
     """
@@ -59,10 +60,13 @@ def main() -> int:
         bridge.setup_signal_handlers()
 
         # Run the bridge (this blocks until shutdown)
-        bridge.run()
+        exit_code = bridge.run()
 
-        logger.info("RadPro MQTT Bridge stopped successfully")
-        return 0
+        if exit_code == 0:
+            logger.info("RadPro MQTT Bridge stopped successfully")
+        else:
+            logger.error(f"RadPro MQTT Bridge stopped with exit code {exit_code}")
+        return exit_code
 
     except ValueError as e:
         # Configuration validation error (Requirement 6.3)

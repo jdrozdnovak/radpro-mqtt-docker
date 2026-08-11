@@ -8,9 +8,32 @@ from unittest.mock import Mock, patch
 
 import paho.mqtt.client as mqtt
 import pytest
+from paho.mqtt.enums import CallbackAPIVersion
+from paho.mqtt.packettypes import PacketTypes
+from paho.mqtt.reasoncodes import ReasonCode
 
 from src.config import Config
 from src.mqtt_publisher import MQTTPublisher
+
+
+def connack(name: str = "Success") -> ReasonCode:
+    """Build a CONNACK reason code as paho-mqtt hands it to on_connect."""
+    return ReasonCode(PacketTypes.CONNACK, name)
+
+
+def disconnect_reason(name: str = "Success") -> ReasonCode:
+    """Build a DISCONNECT reason code as paho-mqtt hands it to on_disconnect."""
+    return ReasonCode(PacketTypes.DISCONNECT, name)
+
+
+def disconnect_flags(from_server: bool = False) -> mqtt.DisconnectFlags:
+    """Build the disconnect flags paho-mqtt passes to on_disconnect."""
+    return mqtt.DisconnectFlags(is_disconnect_packet_from_server=from_server)
+
+
+def connect_flags() -> mqtt.ConnectFlags:
+    """Build the connect flags paho-mqtt passes to on_connect."""
+    return mqtt.ConnectFlags(session_present=False)
 
 
 @pytest.fixture
@@ -48,9 +71,13 @@ class TestMQTTPublisherInit:
 
         publisher = MQTTPublisher(config)
 
-        # Verify client was created with correct parameters
+        # Verify client was created with the modern callback API and automatic
+        # reconnection enabled
         mock_client_class.assert_called_once_with(
-            client_id="radpro-mqtt-bridge", clean_session=True
+            CallbackAPIVersion.VERSION2,
+            client_id=config.effective_client_id,
+            clean_session=True,
+            reconnect_on_failure=True,
         )
         assert publisher.config == config
         assert publisher._client == mock_client
@@ -113,17 +140,16 @@ class TestMQTTPublisherConnect:
     """Tests for MQTTPublisher connect method."""
 
     @patch("src.mqtt_publisher.mqtt.Client")
-    @patch("src.mqtt_publisher.time.sleep")
-    def test_connect_success(self, mock_sleep, mock_client_class, config):
+    def test_connect_success(self, mock_client_class, config):
         """Test successful connection to MQTT broker."""
         mock_client = Mock()
         mock_client_class.return_value = mock_client
 
         publisher = MQTTPublisher(config)
 
-        # Simulate successful connection by calling the callback
+        # Simulate the network thread receiving the CONNACK
         def connect_side_effect(*args, **kwargs):
-            publisher._on_connect(mock_client, None, {}, 0)
+            publisher._on_connect(mock_client, None, connect_flags(), connack())
 
         mock_client.connect.side_effect = connect_side_effect
 
@@ -138,20 +164,48 @@ class TestMQTTPublisherConnect:
         assert publisher.is_connected() is True
 
     @patch("src.mqtt_publisher.mqtt.Client")
-    @patch("src.mqtt_publisher.time.sleep")
-    @patch("src.mqtt_publisher.time.time")
-    def test_connect_timeout(self, mock_time, mock_sleep, mock_client_class, config):
+    def test_connect_bounds_reconnect_backoff(self, mock_client_class, config):
+        """Test that the automatic reconnect backoff is bounded."""
+        mock_client = Mock()
+        mock_client_class.return_value = mock_client
+
+        publisher = MQTTPublisher(config)
+        publisher.connect(timeout=0.01)
+
+        # A long backoff would turn a brief outage into a long data gap
+        mock_client.reconnect_delay_set.assert_called_once_with(min_delay=1, max_delay=60)
+
+    @patch("src.mqtt_publisher.mqtt.Client")
+    def test_connect_timeout(self, mock_client_class, config):
         """Test connection timeout when broker doesn't respond."""
         mock_client = Mock()
         mock_client_class.return_value = mock_client
 
-        # Simulate timeout by making time progress
-        mock_time.side_effect = [0, 0.1, 0.2, 11]  # Exceeds 10 second timeout
+        publisher = MQTTPublisher(config)
+
+        # No CONNACK arrives, so connect() gives up after the timeout
+        result = publisher.connect(timeout=0.01)
+
+        assert result is False
+        assert publisher.is_connected() is False
+
+    @patch("src.mqtt_publisher.mqtt.Client")
+    def test_connect_failure_reason_code(self, mock_client_class, config):
+        """Test that a refused connection is reported without waiting."""
+        mock_client = Mock()
+        mock_client_class.return_value = mock_client
 
         publisher = MQTTPublisher(config)
-        result = publisher.connect()
 
-        # Verify connection failed
+        def connect_side_effect(*args, **kwargs):
+            publisher._on_connect(
+                mock_client, None, connect_flags(), connack("Bad user name or password")
+            )
+
+        mock_client.connect.side_effect = connect_side_effect
+
+        result = publisher.connect(timeout=5)
+
         assert result is False
         assert publisher.is_connected() is False
 
@@ -281,7 +335,7 @@ class TestMQTTPublisherCallbacks:
         mock_client_class.return_value = mock_client
 
         publisher = MQTTPublisher(config)
-        publisher._on_connect(mock_client, None, {}, 0)
+        publisher._on_connect(mock_client, None, connect_flags(), connack())
 
         # Verify connection state was updated
         assert publisher.is_connected() is True
@@ -294,10 +348,43 @@ class TestMQTTPublisherCallbacks:
 
         publisher = MQTTPublisher(config)
 
-        # Test various error codes
-        for error_code in [1, 2, 3, 4, 5]:
-            publisher._on_connect(mock_client, None, {}, error_code)
+        failures = [
+            "Unsupported protocol version",
+            "Client identifier not valid",
+            "Server unavailable",
+            "Bad user name or password",
+            "Not authorized",
+        ]
+        for failure in failures:
+            publisher._on_connect(mock_client, None, connect_flags(), connack(failure))
             assert publisher.is_connected() is False
+
+    @patch("src.mqtt_publisher.mqtt.Client")
+    def test_on_connect_reannounces_device(self, mock_client_class, config):
+        """Test that a reconnect triggers the re-announcement callback."""
+        mock_client = Mock()
+        mock_client_class.return_value = mock_client
+
+        publisher = MQTTPublisher(config)
+        publisher.on_connected = Mock()
+
+        publisher._on_connect(mock_client, None, connect_flags(), connack())
+
+        publisher.on_connected.assert_called_once()
+
+    @patch("src.mqtt_publisher.mqtt.Client")
+    def test_on_connect_survives_failing_reannounce(self, mock_client_class, config):
+        """Test that a failing re-announcement does not kill the network thread."""
+        mock_client = Mock()
+        mock_client_class.return_value = mock_client
+
+        publisher = MQTTPublisher(config)
+        publisher.on_connected = Mock(side_effect=RuntimeError("boom"))
+
+        # An exception escaping here would propagate into paho's network loop
+        publisher._on_connect(mock_client, None, connect_flags(), connack())
+
+        assert publisher._connected is True
 
     @patch("src.mqtt_publisher.mqtt.Client")
     def test_on_disconnect_clean(self, mock_client_class, config):
@@ -307,7 +394,7 @@ class TestMQTTPublisherCallbacks:
 
         publisher = MQTTPublisher(config)
         publisher._connected = True
-        publisher._on_disconnect(mock_client, None, 0)
+        publisher._on_disconnect(mock_client, None, disconnect_flags(), disconnect_reason())
 
         # Verify connection state was updated
         assert publisher.is_connected() is False
@@ -320,10 +407,32 @@ class TestMQTTPublisherCallbacks:
 
         publisher = MQTTPublisher(config)
         publisher._connected = True
-        publisher._on_disconnect(mock_client, None, 1)
+        publisher._on_disconnect(
+            mock_client, None, disconnect_flags(), disconnect_reason("Unspecified error")
+        )
 
         # Verify connection state was updated
         assert publisher.is_connected() is False
+
+    @patch("src.mqtt_publisher.mqtt.Client")
+    def test_on_disconnect_does_not_reconnect_itself(self, mock_client_class, config):
+        """Test that the disconnect callback leaves reconnection to paho-mqtt.
+
+        Reconnecting from this callback blocks paho's network thread - the very
+        thread that would otherwise re-establish the connection - and is how the
+        bridge used to end up connected-but-silent.
+        """
+        mock_client = Mock()
+        mock_client_class.return_value = mock_client
+
+        publisher = MQTTPublisher(config)
+        publisher._connected = True
+
+        publisher._on_disconnect(
+            mock_client, None, disconnect_flags(), disconnect_reason("Unspecified error")
+        )
+
+        mock_client.reconnect.assert_not_called()
 
 
 class TestMQTTPublisherIsConnected:
@@ -333,6 +442,7 @@ class TestMQTTPublisherIsConnected:
     def test_is_connected_when_connected(self, mock_client_class, config):
         """Test is_connected returns True when connected."""
         mock_client = Mock()
+        mock_client.is_connected.return_value = True
         mock_client_class.return_value = mock_client
 
         publisher = MQTTPublisher(config)
@@ -344,10 +454,27 @@ class TestMQTTPublisherIsConnected:
     def test_is_connected_when_not_connected(self, mock_client_class, config):
         """Test is_connected returns False when not connected."""
         mock_client = Mock()
+        mock_client.is_connected.return_value = True
         mock_client_class.return_value = mock_client
 
         publisher = MQTTPublisher(config)
         publisher._connected = False
+
+        assert publisher.is_connected() is False
+
+    @patch("src.mqtt_publisher.mqtt.Client")
+    def test_is_connected_when_client_dropped_the_socket(self, mock_client_class, config):
+        """Test is_connected trusts the client over our cached flag.
+
+        The client can notice a dead socket before our disconnect callback has
+        run; publishing into it would silently go nowhere.
+        """
+        mock_client = Mock()
+        mock_client.is_connected.return_value = False
+        mock_client_class.return_value = mock_client
+
+        publisher = MQTTPublisher(config)
+        publisher._connected = True
 
         assert publisher.is_connected() is False
 
@@ -1255,251 +1382,199 @@ class TestPublishAvailability:
 
 
 class TestMQTTErrorRecovery:
-    """Tests for MQTT error recovery and reconnection logic."""
+    """Tests for MQTT error recovery behaviour."""
 
     @patch("src.mqtt_publisher.mqtt.Client")
-    def test_init_sets_reconnection_state(self, mock_client_class, config):
-        """Test that __init__ initializes reconnection state variables."""
+    def test_client_handles_its_own_reconnection(self, mock_client_class, config):
+        """Test that the client is created with automatic reconnection enabled."""
         mock_client = Mock()
         mock_client_class.return_value = mock_client
 
-        publisher = MQTTPublisher(config)
+        MQTTPublisher(config)
 
-        # Verify reconnection state is initialized
-        assert publisher._reconnect_attempts == 0
-        assert publisher._max_reconnect_attempts == config.max_retries
-        assert publisher._should_reconnect is True
+        _, kwargs = mock_client_class.call_args
+        assert kwargs["reconnect_on_failure"] is True
 
     @patch("src.mqtt_publisher.mqtt.Client")
-    def test_on_connect_resets_reconnect_attempts(self, mock_client_class, config):
-        """Test that successful connection resets reconnection attempts."""
+    def test_client_id_is_unique_per_host(self, mock_client_class, config):
+        """Test that the default client id is host specific.
+
+        Two bridges sharing a client id disconnect each other in a loop, which
+        looks exactly like "it randomly stops sending data".
+        """
         mock_client = Mock()
         mock_client_class.return_value = mock_client
 
-        publisher = MQTTPublisher(config)
-        publisher._reconnect_attempts = 5
+        MQTTPublisher(config)
 
-        # Simulate successful connection
-        publisher._on_connect(mock_client, None, {}, 0)
-
-        # Verify reconnection attempts were reset
-        assert publisher._reconnect_attempts == 0
-        assert publisher.is_connected() is True
+        _, kwargs = mock_client_class.call_args
+        assert kwargs["client_id"] == config.effective_client_id
+        assert kwargs["client_id"].startswith("radpro-mqtt-bridge-")
 
     @patch("src.mqtt_publisher.mqtt.Client")
-    def test_on_connect_handles_authentication_error(self, mock_client_class, config):
-        """Test that authentication errors disable reconnection."""
+    def test_configured_client_id_is_used(self, mock_client_class):
+        """Test that an explicit MQTT_CLIENT_ID overrides the default."""
         mock_client = Mock()
         mock_client_class.return_value = mock_client
 
-        publisher = MQTTPublisher(config)
+        config = Config(mqtt_host="test.mosquitto.org", mqtt_client_id="my-bridge")
+        MQTTPublisher(config)
 
-        # Simulate authentication error (rc=4: bad username or password)
-        publisher._on_connect(mock_client, None, {}, 4)
-
-        # Verify reconnection is disabled
-        assert publisher._should_reconnect is False
-        assert publisher.is_connected() is False
+        _, kwargs = mock_client_class.call_args
+        assert kwargs["client_id"] == "my-bridge"
 
     @patch("src.mqtt_publisher.mqtt.Client")
-    def test_on_connect_handles_authorization_error(self, mock_client_class, config):
-        """Test that authorization errors disable reconnection."""
+    def test_publish_is_refused_while_disconnected(self, mock_client_class, config):
+        """Test that readings are dropped rather than queued while offline."""
         mock_client = Mock()
+        mock_client.is_connected.return_value = False
         mock_client_class.return_value = mock_client
 
         publisher = MQTTPublisher(config)
+        publisher._connected = False
 
-        # Simulate authorization error (rc=5: not authorized)
-        publisher._on_connect(mock_client, None, {}, 5)
-
-        # Verify reconnection is disabled
-        assert publisher._should_reconnect is False
-        assert publisher.is_connected() is False
+        assert publisher.publish_sensor_state("dose_rate", 0.15) is False
+        mock_client.publish.assert_not_called()
 
     @patch("src.mqtt_publisher.mqtt.Client")
-    @patch("src.mqtt_publisher.time.sleep")
-    def test_on_disconnect_triggers_reconnection(self, mock_sleep, mock_client_class, config):
-        """Test that unexpected disconnect triggers reconnection attempt."""
+    def test_publish_does_not_reconnect_by_hand(self, mock_client_class, config):
+        """Test that publishing never drives reconnection itself.
+
+        Calling reconnect() from the polling thread races the network thread
+        for the socket and can leave the client permanently wedged.
+        """
         mock_client = Mock()
+        mock_client.is_connected.return_value = False
         mock_client_class.return_value = mock_client
 
         publisher = MQTTPublisher(config)
-        publisher._connected = True
-        publisher._should_reconnect = True
+        publisher._connected = False
 
-        # Mock reconnect to succeed immediately
-        def reconnect_side_effect():
-            publisher._connected = True
+        publisher.publish_sensor_state("dose_rate", 0.15)
+        publisher.publish_availability("online")
+        publisher.publish_discovery(Mock())
 
-        mock_client.reconnect.side_effect = reconnect_side_effect
-
-        # Simulate unexpected disconnect (rc != 0)
-        publisher._on_disconnect(mock_client, None, 1)
-
-        # Verify reconnection was attempted
-        assert mock_client.reconnect.called
+        mock_client.reconnect.assert_not_called()
 
     @patch("src.mqtt_publisher.mqtt.Client")
-    def test_on_disconnect_clean_no_reconnection(self, mock_client_class, config):
-        """Test that clean disconnect does not trigger reconnection."""
+    def test_disconnect_stops_network_thread(self, mock_client_class, config):
+        """Test that disconnecting also stops the reconnecting network thread."""
         mock_client = Mock()
         mock_client_class.return_value = mock_client
 
         publisher = MQTTPublisher(config)
         publisher._connected = True
 
-        # Simulate clean disconnect (rc = 0)
-        publisher._on_disconnect(mock_client, None, 0)
-
-        # Verify reconnection was not attempted
-        mock_client.reconnect.assert_not_called()
-
-    @patch("src.mqtt_publisher.mqtt.Client")
-    @patch("src.mqtt_publisher.time.sleep")
-    @patch("src.mqtt_publisher.time.time")
-    def test_attempt_reconnect_exponential_backoff(
-        self, mock_time, mock_sleep, mock_client_class, config
-    ):
-        """Test that reconnection uses exponential backoff."""
-        mock_client = Mock()
-        mock_client_class.return_value = mock_client
-
-        publisher = MQTTPublisher(config)
-        publisher._should_reconnect = True
-
-        # Mock time to simulate timeout
-        mock_time.side_effect = [0, 0.1, 11]  # Timeout after first attempt
-
-        # First reconnection attempt
-        publisher._attempt_reconnect()
-
-        # Verify backoff delay was calculated correctly (2^0 = 1)
-        # The first call should be the backoff delay
-        assert mock_sleep.call_count >= 1
-        first_call = mock_sleep.call_args_list[0]
-        assert first_call[0][0] == 1.0
-        assert publisher._reconnect_attempts == 1
-
-        # Second reconnection attempt
-        mock_sleep.reset_mock()
-        mock_time.side_effect = [0, 0.1, 11]
-        publisher._attempt_reconnect()
-
-        # Verify backoff delay increased (2^1 = 2)
-        assert mock_sleep.call_count >= 1
-        first_call = mock_sleep.call_args_list[0]
-        assert first_call[0][0] == 2.0
-        assert publisher._reconnect_attempts == 2
-
-    @patch("src.mqtt_publisher.mqtt.Client")
-    @patch("src.mqtt_publisher.time.sleep")
-    def test_attempt_reconnect_max_retries(self, mock_sleep, mock_client_class, config):
-        """Test that reconnection stops after max retries."""
-        mock_client = Mock()
-        mock_client_class.return_value = mock_client
-
-        publisher = MQTTPublisher(config)
-        publisher._should_reconnect = True
-        publisher._reconnect_attempts = config.max_retries
-
-        # Attempt reconnection after max retries reached
-        publisher._attempt_reconnect()
-
-        # Verify reconnection was not attempted
-        mock_client.reconnect.assert_not_called()
-
-    @patch("src.mqtt_publisher.mqtt.Client")
-    def test_attempt_reconnect_disabled(self, mock_client_class, config):
-        """Test that reconnection does not occur when disabled."""
-        mock_client = Mock()
-        mock_client_class.return_value = mock_client
-
-        publisher = MQTTPublisher(config)
-        publisher._should_reconnect = False
-
-        # Attempt reconnection when disabled
-        publisher._attempt_reconnect()
-
-        # Verify reconnection was not attempted
-        mock_client.reconnect.assert_not_called()
-
-    @patch("src.mqtt_publisher.mqtt.Client")
-    @patch("src.mqtt_publisher.time.sleep")
-    @patch("src.mqtt_publisher.time.time")
-    def test_attempt_reconnect_success(self, mock_time, mock_sleep, mock_client_class, config):
-        """Test successful reconnection."""
-        mock_client = Mock()
-        mock_client_class.return_value = mock_client
-
-        publisher = MQTTPublisher(config)
-        publisher._should_reconnect = True
-
-        # Mock successful reconnection
-        def reconnect_side_effect():
-            publisher._connected = True
-
-        mock_client.reconnect.side_effect = reconnect_side_effect
-        mock_time.side_effect = [0, 0.1, 0.2]  # Connection succeeds quickly
-
-        # Attempt reconnection
-        publisher._attempt_reconnect()
-
-        # Verify reconnection was attempted
-        mock_client.reconnect.assert_called_once()
-
-    @patch("src.mqtt_publisher.mqtt.Client")
-    @patch("src.mqtt_publisher.time.sleep")
-    def test_attempt_reconnect_handles_exception(self, mock_sleep, mock_client_class, config):
-        """Test that reconnection handles exceptions gracefully."""
-        mock_client = Mock()
-        mock_client_class.return_value = mock_client
-        mock_client.reconnect.side_effect = Exception("Reconnection error")
-
-        publisher = MQTTPublisher(config)
-        publisher._should_reconnect = True
-
-        # Should not raise exception
-        publisher._attempt_reconnect()
-
-        # Verify reconnection was attempted
-        mock_client.reconnect.assert_called_once()
-
-    @patch("src.mqtt_publisher.mqtt.Client")
-    def test_disconnect_disables_reconnection(self, mock_client_class, config):
-        """Test that manual disconnect disables automatic reconnection."""
-        mock_client = Mock()
-        mock_client_class.return_value = mock_client
-
-        publisher = MQTTPublisher(config)
-        publisher._connected = True
-        publisher._should_reconnect = True
-
-        # Manually disconnect
         publisher.disconnect()
 
-        # Verify reconnection is disabled
-        assert publisher._should_reconnect is False
+        mock_client.disconnect.assert_called_once()
+        mock_client.loop_stop.assert_called_once()
 
     @patch("src.mqtt_publisher.mqtt.Client")
-    @patch("src.mqtt_publisher.time.sleep")
-    def test_connect_enables_reconnection(self, mock_sleep, mock_client_class, config):
-        """Test that connect enables automatic reconnection."""
+    def test_disconnect_stops_network_thread_when_not_connected(self, mock_client_class, config):
+        """Test that the network thread is stopped even if no session is up."""
         mock_client = Mock()
         mock_client_class.return_value = mock_client
 
         publisher = MQTTPublisher(config)
-        publisher._should_reconnect = False
+        publisher._connected = False
 
-        # Simulate successful connection
-        def connect_side_effect(*args, **kwargs):
-            publisher._on_connect(mock_client, None, {}, 0)
+        publisher.disconnect()
 
-        mock_client.connect.side_effect = connect_side_effect
+        mock_client.loop_stop.assert_called_once()
 
-        # Connect
-        result = publisher.connect()
 
-        # Verify reconnection is enabled
-        assert publisher._should_reconnect is True
-        assert publisher._reconnect_attempts == 0
-        assert result is True
+class TestWaitForDelivery:
+    """Tests for the publish acknowledgement check."""
+
+    @patch("src.mqtt_publisher.mqtt.Client")
+    def test_returns_true_when_nothing_pending(self, mock_client_class, config):
+        """Test that waiting with no outstanding publish succeeds."""
+        mock_client = Mock()
+        mock_client_class.return_value = mock_client
+
+        publisher = MQTTPublisher(config)
+
+        assert publisher.wait_for_delivery(timeout=1) is True
+
+    @patch("src.mqtt_publisher.mqtt.Client")
+    def test_waits_for_the_last_publish(self, mock_client_class, config):
+        """Test that the broker acknowledgement is awaited."""
+        mock_client = Mock()
+        mock_client.is_connected.return_value = True
+        mock_result = Mock()
+        mock_result.rc = mqtt.MQTT_ERR_SUCCESS
+        mock_result.is_published.return_value = True
+        mock_client.publish.return_value = mock_result
+        mock_client_class.return_value = mock_client
+
+        publisher = MQTTPublisher(config)
+        publisher._connected = True
+        publisher.publish_sensor_state("dose_rate", 0.15)
+
+        assert publisher.wait_for_delivery(timeout=5) is True
+        mock_result.wait_for_publish.assert_called_once_with(5)
+
+    @patch("src.mqtt_publisher.mqtt.Client")
+    def test_reports_silently_timed_out_publish(self, mock_client_class, config):
+        """Test that a publish the broker ignored is reported as a failure.
+
+        paho's wait_for_publish() returns without raising when it times out, so
+        the acknowledgement has to be confirmed explicitly - otherwise a
+        black-holed connection still looks like a healthy one.
+        """
+        mock_client = Mock()
+        mock_client.is_connected.return_value = True
+        mock_result = Mock()
+        mock_result.rc = mqtt.MQTT_ERR_SUCCESS
+        mock_result.is_published.return_value = False
+        mock_client.publish.return_value = mock_result
+        mock_client_class.return_value = mock_client
+
+        publisher = MQTTPublisher(config)
+        publisher._connected = True
+        publisher.publish_sensor_state("dose_rate", 0.15)
+
+        assert publisher.wait_for_delivery(timeout=1) is False
+
+    @patch("src.mqtt_publisher.mqtt.Client")
+    def test_reports_unacknowledged_publish(self, mock_client_class, config):
+        """Test that a publish the broker never acknowledges is reported.
+
+        This is the signal that separates a healthy connection from a socket
+        that accepts writes but delivers nothing.
+        """
+        mock_client = Mock()
+        mock_client.is_connected.return_value = True
+        mock_result = Mock()
+        mock_result.rc = mqtt.MQTT_ERR_SUCCESS
+        mock_result.wait_for_publish.side_effect = RuntimeError("wait_for_publish timed out")
+        mock_client.publish.return_value = mock_result
+        mock_client_class.return_value = mock_client
+
+        publisher = MQTTPublisher(config)
+        publisher._connected = True
+        publisher.publish_sensor_state("dose_rate", 0.15)
+
+        assert publisher.wait_for_delivery(timeout=1) is False
+
+    @patch("src.mqtt_publisher.mqtt.Client")
+    def test_pending_publish_is_cleared_after_waiting(self, mock_client_class, config):
+        """Test that each cycle waits on its own message only."""
+        mock_client = Mock()
+        mock_client.is_connected.return_value = True
+        mock_result = Mock()
+        mock_result.rc = mqtt.MQTT_ERR_SUCCESS
+        mock_result.is_published.return_value = True
+        mock_client.publish.return_value = mock_result
+        mock_client_class.return_value = mock_client
+
+        publisher = MQTTPublisher(config)
+        publisher._connected = True
+        publisher.publish_sensor_state("dose_rate", 0.15)
+
+        publisher.wait_for_delivery(timeout=5)
+        mock_result.wait_for_publish.reset_mock()
+
+        assert publisher.wait_for_delivery(timeout=5) is True
+        mock_result.wait_for_publish.assert_not_called()
