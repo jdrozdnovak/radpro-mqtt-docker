@@ -22,6 +22,7 @@ class TestMainIntegration:
         """
         # Setup mock bridge
         mock_bridge_instance = MagicMock()
+        mock_bridge_instance.run.return_value = 0
         mock_bridge.return_value = mock_bridge_instance
 
         # Set up realistic environment variables
@@ -71,6 +72,7 @@ class TestMainIntegration:
         """
         # Setup mock bridge
         mock_bridge_instance = MagicMock()
+        mock_bridge_instance.run.return_value = 0
         mock_bridge.return_value = mock_bridge_instance
 
         # Set up environment with JSON logging
@@ -117,6 +119,7 @@ class TestMainIntegration:
         """
         # Setup mock bridge
         mock_bridge_instance = MagicMock()
+        mock_bridge_instance.run.return_value = 0
         mock_bridge.return_value = mock_bridge_instance
 
         # Set up minimal environment (only required variables)

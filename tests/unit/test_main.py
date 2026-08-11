@@ -42,6 +42,7 @@ class TestMain:
 
         # Setup mock bridge
         mock_bridge_instance = MagicMock()
+        mock_bridge_instance.run.return_value = 0
         mock_bridge.return_value = mock_bridge_instance
 
         # Run main
@@ -83,6 +84,7 @@ class TestMain:
 
         # Setup mock bridge
         mock_bridge_instance = MagicMock()
+        mock_bridge_instance.run.return_value = 0
         mock_bridge.return_value = mock_bridge_instance
 
         # Run main with JSON format
@@ -170,3 +172,31 @@ class TestMain:
 
         # Verify exit code is 1
         assert exit_code == 1
+
+    @patch("src.main.RadProBridge")
+    @patch("src.main.configure_logging")
+    @patch("src.main.Config.from_env")
+    def test_main_propagates_restart_request(
+        self,
+        mock_config_from_env: MagicMock,
+        mock_configure_logging: MagicMock,
+        mock_bridge: MagicMock,
+    ) -> None:
+        """Test that a watchdog-triggered exit reaches the container runtime.
+
+        The bridge asks for a restart by exiting non-zero; swallowing that here
+        would leave a stalled bridge running forever under a restart policy
+        that only reacts to failures.
+        """
+        mock_config = MagicMock()
+        mock_config.log_level = "INFO"
+        mock_config_from_env.return_value = mock_config
+
+        mock_bridge_instance = MagicMock()
+        mock_bridge_instance.run.return_value = 2
+        mock_bridge.return_value = mock_bridge_instance
+
+        with patch.dict(os.environ, {"LOG_FORMAT": "text"}):
+            exit_code = main()
+
+        assert exit_code == 2

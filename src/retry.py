@@ -21,12 +21,17 @@ def retry_with_backoff(
     backoff_base: float = 2.0,
     exceptions: type[Exception] | tuple[type[Exception], ...] = Exception,
     on_retry: Callable[[Exception, int], None] | None = None,
+    max_delay: float = 60.0,
 ) -> Callable[[F], F]:
     """Decorator that retries a function with exponential backoff.
 
     This decorator implements a retry mechanism with exponential backoff for
     handling transient failures. The delay between retries increases exponentially
-    according to the formula: delay = backoff_base^attempt
+    according to the formula: delay = min(backoff_base^attempt, max_delay)
+
+    The delay is capped: with the default base of 2.0, an uncapped tenth retry
+    would sleep for over eight minutes, blocking the caller long past the point
+    where restarting the process is the better answer.
 
     Args:
         max_retries: Maximum number of retry attempts (default: 10)
@@ -34,6 +39,7 @@ def retry_with_backoff(
         exceptions: Exception type(s) to catch and retry (default: Exception)
         on_retry: Optional callback function called on each retry attempt,
                  receives the exception and attempt number
+        max_delay: Upper bound for a single backoff delay in seconds (default: 60.0)
 
     Returns:
         Decorated function that implements retry logic
@@ -72,8 +78,8 @@ def retry_with_backoff(
                         raise
 
                     # Calculate exponential backoff delay (Requirement 8.2)
-                    # delay = base^attempt
-                    delay = backoff_base**attempt
+                    # delay = min(base^attempt, max_delay)
+                    delay = min(backoff_base**attempt, max_delay)
 
                     logger.warning(
                         f"Function {func_name} failed "

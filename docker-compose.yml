@@ -2,29 +2,79 @@ services:
   radpro-mqtt-bridge:
     image: ghcr.io/jdrozdnovak/radpro-mqtt-docker:latest
     container_name: radpro-mqtt-bridge
+
+    # Restart on any exit, including the non-zero exit the bridge uses to ask
+    # for a restart when it detects it has stopped delivering data
     restart: unless-stopped
-    
+
+    # Allow the graceful shutdown (offline status + clean MQTT disconnect)
+    # to finish before Docker sends SIGKILL
+    stop_grace_period: 30s
+
     # USB device mapping for RadPro device
     devices:
       - /dev/ttyACM0:/dev/ttyACM0
-    
+
     # Environment variables
     environment:
       # Required: MQTT broker configuration
       - MQTT_HOST=ip
       - MQTT_PORT=1883
-      
+
       # Optional: MQTT authentication
       - MQTT_USERNAME=
       - MQTT_PASSWORD=
-      
+
       # Optional: Topic configuration
       - MQTT_TOPIC_PREFIX=radpro
       - HA_DISCOVERY_PREFIX=homeassistant
-      
+
       # Optional: Device configuration
       - RADPRO_DEVICE=/dev/ttyACM0
       - POLL_INTERVAL=60
-      
+
       # Optional: Logging
       - LOG_LEVEL=INFO
+
+      # Optional: Self-healing behaviour
+      # Restart the bridge if no data reaches the broker for this long.
+      # 0 (default) means max(300, POLL_INTERVAL * 5).
+      # - WATCHDOG_TIMEOUT=0
+      # Force a device reconnect after this many failed polling cycles
+      # - MAX_CONSECUTIVE_FAILURES=5
+      # Seconds to wait for the broker to acknowledge a publish
+      # - PUBLISH_ACK_TIMEOUT=10
+      # MQTT keepalive; lower values detect a dead broker faster
+      # - MQTT_KEEPALIVE=60
+      # Override only if you run several bridges against one broker.
+      # Two clients sharing an id disconnect each other in a loop.
+      # - MQTT_CLIENT_ID=radpro-mqtt-bridge
+
+    # Keep logs from filling the disk on small hosts (e.g. a Raspberry Pi)
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional: restart containers that report unhealthy.
+  #
+  # The bridge already restarts itself when it notices it has stopped
+  # publishing - Docker's restart policy handles that, because the process
+  # exits. This sidecar covers the remaining case where the process is alive
+  # but so wedged that even its own watchdog thread cannot run.
+  #
+  # It needs access to the Docker socket, so enable it only if you are
+  # comfortable with that. Start it with:
+  #   docker compose --profile autoheal up -d
+  #
+  # autoheal:
+  #   image: willfarrell/autoheal:latest
+  #   container_name: radpro-autoheal
+  #   restart: unless-stopped
+  #   profiles: [autoheal]
+  #   environment:
+  #     - AUTOHEAL_CONTAINER_LABEL=all
+  #     - AUTOHEAL_INTERVAL=60
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock

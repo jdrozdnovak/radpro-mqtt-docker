@@ -12,6 +12,7 @@ A containerized Python application that bridges [RadPro](https://radpro.software
 - **Real-time Monitoring**: Continuous radiation measurement polling with configurable intervals
 - **Comprehensive Metrics**: Tracks dose rate (µSv/h), counts per minute (CPM), total pulses, battery voltage, and tube lifetime
 - **Resilient Operation**: Automatic reconnection handling for both USB and MQTT connections
+- **Self-Healing**: Confirms every publish is acknowledged by the broker, and restarts itself if data stops arriving
 - **Docker Ready**: Fully containerized with multi-architecture support (amd64, arm64)
 - **Easy Configuration**: Environment variable-based configuration with sensible defaults
 - **Production Ready**: Comprehensive logging, health checks, and graceful shutdown handling
@@ -104,6 +105,25 @@ All configuration is done via environment variables:
 | `RADPRO_DEVICE` | USB device path for RadPro device | `/dev/ttyACM0` |
 | `POLL_INTERVAL` | Data polling interval in seconds | `60` |
 | `LOG_LEVEL` | Logging verbosity (DEBUG, INFO, WARNING, ERROR) | `INFO` |
+
+### Reliability Configuration
+
+These control how the bridge detects and recovers from a stall. The defaults
+suit most setups.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `WATCHDOG_TIMEOUT` | Seconds without data reaching the broker before the bridge exits for a restart | `0` (= `max(300, POLL_INTERVAL * 5)`) |
+| `MAX_CONSECUTIVE_FAILURES` | Failed polling cycles before forcing a device reconnect | `5` |
+| `PUBLISH_ACK_TIMEOUT` | Seconds to wait for the broker to acknowledge a publish | `10` |
+| `MQTT_KEEPALIVE` | MQTT keepalive in seconds; lower detects a dead broker sooner | `60` |
+| `MQTT_CLIENT_ID` | MQTT client identifier | `radpro-mqtt-bridge-<hostname>` |
+| `HEALTH_FILE` | Path of the file touched after each successful publish | `/tmp/health` |
+
+> Only set `MQTT_CLIENT_ID` if you run several bridges against one broker, and
+> give each a different value. Two MQTT clients sharing an identifier
+> disconnect each other in a loop, which looks like the bridge randomly
+> stopping.
 
 ### Finding Your USB Device
 
@@ -286,6 +306,49 @@ Home Assistant discovery payloads are published to:
    ```bash
    dmesg | grep -i usb
    ```
+
+### Data Stops Arriving While the Container Stays Up
+
+**Problem**: The container is running and its logs look normal, but no new
+values reach MQTT or Home Assistant.
+
+The bridge detects this itself. Every polling cycle waits for the broker to
+acknowledge the data, and if nothing is acknowledged for `WATCHDOG_TIMEOUT`
+seconds the process exits so the container restarts. Two watchdogs cover this:
+one in the polling loop (graceful shutdown, exit code 2) and one in a separate
+thread that force-exits if even the polling loop is stuck.
+
+`restart: unless-stopped` (or `always`/`on-failure`) is required for the
+restart to happen - Docker never restarts a container just for being
+unhealthy, only for exiting.
+
+**What to check**:
+1. Confirm the restart policy is set:
+   ```bash
+   docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' radpro-mqtt-bridge
+   ```
+2. Look for watchdog messages and restart counts:
+   ```bash
+   docker logs radpro-mqtt-bridge 2>&1 | grep -i watchdog
+   docker inspect -f '{{.RestartCount}}' radpro-mqtt-bridge
+   ```
+3. Check the reported health, which turns unhealthy once publishing stops:
+   ```bash
+   docker inspect -f '{{.State.Health.Status}}' radpro-mqtt-bridge
+   docker exec radpro-mqtt-bridge python -m src.healthcheck
+   ```
+4. Make sure no second bridge (or another MQTT client) uses the same client
+   id - see `MQTT_CLIENT_ID` above.
+5. If restarts happen but data still stalls quickly afterwards, the USB device
+   is the likely culprit; check `dmesg | grep -i usb` for controller resets.
+
+To restart the container on unhealthy status as well - which covers a process
+so wedged that even its watchdog thread cannot run - enable the optional
+`autoheal` sidecar in `docker-compose.yml`:
+
+```bash
+docker compose --profile autoheal up -d
+```
 
 ### High CPU Usage
 
