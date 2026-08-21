@@ -42,7 +42,7 @@ dev = [
     "hypothesis==6.165.3",
     "pytest-mock==3.15.1",
     "black==26.5.1",
-    "mypy==2.3.0",
+    "mypy==2.3.1",
     "ruff==0.16.2",
 ]
 
@@ -146,7 +146,7 @@ exclude_lines = [
 dev = [
     "black==26.5.1",
     "hypothesis==6.165.3",
-    "mypy==2.3.0",
+    "mypy==2.3.1",
     "pytest==9.1.1",
     "pytest-mock==3.15.1",
     "ruff==0.16.2",
