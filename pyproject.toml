@@ -39,7 +39,7 @@ dependencies = [
 # the 1.6 stubs would shadow them and type-check against the old callback API.
 dev = [
     "pytest==9.1.1",
-    "hypothesis==6.165.3",
+    "hypothesis==6.167.1",
     "pytest-mock==3.15.1",
     "black==26.5.1",
     "mypy==2.3.0",
@@ -145,7 +145,7 @@ exclude_lines = [
 # `uv pip install -e ".[dev]"` install the same tool versions as CI.
 dev = [
     "black==26.5.1",
-    "hypothesis==6.165.3",
+    "hypothesis==6.167.1",
     "mypy==2.3.0",
     "pytest==9.1.1",
     "pytest-mock==3.15.1",
